@@ -1,4 +1,5 @@
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 #include <cstring>
 #include <array>
@@ -10,8 +11,15 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <iostream>
+
+
+namespace py = pybind11;
+
 
 constexpr double pigreco = 3.141592653589793;
+constexpr double duepigreco = 6.283185307179586;
+constexpr double logduepigreco = 1.8378770664093453;
 
 
 // Funzione per calcolare i due insiemi di autocorrelazioni angolari. Esistono tante versioni circolari
@@ -182,14 +190,14 @@ bool testhotelling(const int taglia, const std::vector<double> &ascisse, const s
 int calcolobetatesthotelling(const int taglia, const double soglia, const double distanzabeta,
                              const double varasc, const double varord, const int volteperthread){
     if (taglia < 2){throw std::runtime_error("Dataset troppo piccolo");}
-    if (varasc <= 0.0 || varord >= 0.0){throw std::runtime_error("Varianze non valide");}
+    if (varasc <= 0.0 || varord <= 0.0){throw std::runtime_error("Varianze non valide");}
     // Inizializziamo il contatore delle volte in cui l'ipotesi nulla viene accettata.
     int accettazioni = 0;
     // Prepariamo i generatori di campioni casuali sotto l'ipotesi alternativa.
     std::random_device dispositivo;
     std::mt19937 generatore(dispositivo());
-    std::normal_distribution<> distribuzione1(0.0, varasc);
-    std::normal_distribution<> distribuzione2(distanzabeta, varord);
+    std::normal_distribution<> distribuzione1(0.0, std::sqrt(varasc));
+    std::normal_distribution<> distribuzione2(distanzabeta, std::sqrt(varord));
     // Per ogni iterazione:
     for (int i = 0; i < volteperthread; i++){
         // Estraiamo un campione casuale sotto l'ipotesi alternativa. Poiché assumiamo che la covarianza
@@ -303,7 +311,9 @@ bool ljungbox(const std::vector<double>& autocorrelazioni, const std::vector<int
         const int cutoffattuale = cutoff[i];
         if (cutoffattuale >= n){break;}
         for (int j = inizio; j < cutoffattuale; j++) {
-            somma += autocorrelazioni[j]/(n-j+1);
+            const double autocorrelazione = autocorrelazioni[j];
+            if (n-j-1 <= 0){throw std::runtime_error("Hai sbagliato il denominatore della statistica di Ljung-Box");}
+            somma += autocorrelazione*autocorrelazione/(n-j-1);
         }
         if (n*(n+2)*somma > soglie[i]) {return false;}
         inizio = cutoffattuale;
@@ -330,12 +340,13 @@ int calcolobetaljungbox(const int taglia, const std::vector<int>& cutoff, const 
     // Per ogni iterazione:
     for (int i = 0; i < iterazioni; i++){
         // Assumiamo che sotto l'ipotesi alternativa i dati seguano un processo AR(1),
-        // con \sigma^2=1. Al contempo, calcoliamo la media campionaria del processo.
+        // con \sigma^2=1 e \phi_1=0.5. Al contempo, calcoliamo la media campionaria del processo.
         std::vector<double> serie(taglia);
         double valore = normale(generatore);
         serie[0] = valore;
         double media = valore;
         for (int j = 1; j < taglia; j++){
+            valore *= 0.5;
             valore += normale(generatore);
             serie[j] = valore;
             media += valore;
@@ -359,18 +370,22 @@ int calcolobetaljungbox(const int taglia, const std::vector<int>& cutoff, const 
         // Ora possiamo eseguire il test di Ljung-Box.
         double somma = 0.0;
         int inizio = 0;
+        bool rifiutata = false;
         for (int j = 0; j < numerocutoff; j++) {
             const int cutoffattuale = cutoff[j];
             if (cutoffattuale >= taglia){break;}
             for (int k = inizio; k < cutoffattuale; k++) {
-                somma += autocorrelazioni[k]/(taglia-k+1);
+                const double autocorrelazione = autocorrelazioni[k];
+                if (taglia-k-1 <= 0){throw std::runtime_error("Hai sbagliato il denominatore della statistica di Ljung-Box");}
+                somma += autocorrelazione*autocorrelazione/(taglia-k-1);
             }
             if (taglia*(taglia+2)*somma > soglie[j]) {
-                accettazioni++;
+                rifiutata = true;
                 break;
             }
             inizio = cutoffattuale;
         }
+        if (!rifiutata){accettazioni++;}
     }
     return accettazioni;
 }
@@ -453,18 +468,22 @@ int calcoloalfaveroljungbox(const int taglia, const std::vector<int>& cutoff, co
         // Ora possiamo eseguire il test di Ljung-Box.
         double somma = 0.0;
         int inizio = 0;
+        bool rifiutata = false;
         for (int j = 0; j < numerocutoff; j++) {
             const int cutoffattuale = cutoff[j];
             if (cutoffattuale >= taglia){break;}
             for (int k = inizio; k < cutoffattuale; k++) {
-                somma += autocorrelazioni[k]/(taglia-k+1);
+                const double autocorrelazione = autocorrelazioni[k];
+                if (taglia-k-1 <= 0){throw std::runtime_error("Hai sbagliato il denominatore della statistica di Ljung-Box");}
+                somma += autocorrelazione*autocorrelazione/(taglia-k-1);
             }
             if (taglia*(taglia+2)*somma > soglie[j]) {
-                accettazioni++;
+                rifiutata = true;
                 break;
             }
             inizio = cutoffattuale;
         }
+        if (!rifiutata){accettazioni++;}
     }
     return accettazioni;
 }
@@ -505,7 +524,7 @@ double alfaveroljungbox(const int taglia, const std::vector<int>& cutoff, const 
 
 // Funzione che calcola la statistica test di Henze-Zirkler di un campione per testare l'ipotesi nulla
 // che venga da una normale multivariata, più la media e la varianza della sua distribuzione sotto
-// l'ipotesi nulla. Deve essere passato una lista di ascisse, una lista di ordinate
+// l'ipotesi nulla. Devono essere passate una lista di ascisse, una lista di ordinate
 // e la dimensione del campione n.
 // Adattato dallo script Python per pingouin.multivariate_normality.
 std::array<double, 3> testhenzezirkler(const std::vector<double>& ascisse, const std::vector<double> &ordinate,
@@ -538,81 +557,87 @@ std::array<double, 3> testhenzezirkler(const std::vector<double>& ascisse, const
         varianzaordinate += differenzaordinate*differenzaordinate;
         covarianza += differenzaascisse*differenzaordinate;
     }
-    varianzaascisse /= taglia - 1;
-    varianzaordinate /= taglia - 1;
-    covarianza /= taglia - 1;
-    double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
+    varianzaascisse /= taglia;
+    varianzaordinate /= taglia;
+    covarianza /= taglia;
+    const double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
+    double hz;
+    double lisciatore;
+    double lisciatore2;
     if (determinante < 0.000001){
-        varianzaascisse += 0.000001;
-        varianzaordinate += 0.000001;
-        determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
-    }
-    double inversa11 = varianzaordinate/determinante;
-    double inversa12 = -covarianza/determinante;
-    double inversa22 = varianzaascisse/determinante;
-    // Adesso calcoliamo il prodotto matriciale tra la matrice dei dati centrati e la matrice
-    // di covarianze. Immagazziniamo la prima e la seconda colonna della matrice risultante
-    // come due vettori separati.
-    std::vector<double> primoprodotto1(taglia);
-    std::vector<double> primoprodotto2(taglia);
-    for (int i = 0; i < taglia; i++){
-        primoprodotto1[i] = ascissecentrate[i]*inversa11+ordinatecentrate[i]*inversa12;
-        primoprodotto2[i] = ascissecentrate[i]*inversa12+ordinatecentrate[i]*inversa22;
-    }
-    // Adesso otteniamo la matrice Dj come la matrice diagonale del prodotto fatto prima
-    // moltiplicato per la matrice dei dati centrati trasposta (di fatto completando il prodotto
-    // \bar{x}\Sigma^{-1}\bar{x}^T).
-    std::vector<double> Dj(taglia);
-    for (int i = 0; i < taglia; i++){
-        Dj[i] = primoprodotto1[i]*ascissecentrate[i]+primoprodotto2[i]*ordinatecentrate[i];
-    }
-    // Adesso, in modo simile a prima, otteniamo la matrice Y=x\Sigma^{-1}x^T.
-    std::vector<double> primoprodottodecentrato1(taglia);
-    std::vector<double> primoprodottodecentrato2(taglia);
-    for (int i = 0; i < taglia; i++){
-        primoprodottodecentrato1[i] = ascisse[i]*inversa11+ordinate[i]*inversa12;
-        primoprodottodecentrato2[i] = ascisse[i]*inversa12+ordinate[i]*inversa22;
-    }
-    std::vector<std::vector<double>> Y(taglia, std::vector<double>(taglia));
-    for (int i = 0; i < taglia; i++){
-        for (int j = 0; j < taglia; j++){
-            Y[i][j] = primoprodottodecentrato1[i]*ascisse[i]+primoprodottodecentrato2[i]*ordinate[i];
+        hz = 4.0*taglia;
+        lisciatore = 1.0/std::sqrt(2.0)*std::pow(5.0/4.0, 1.0/6.0)*std::pow(static_cast<double>(taglia), 1.0/6.0);
+        lisciatore2 = lisciatore*lisciatore;
+    } else {
+        double inversa11 = varianzaordinate/determinante;
+        double inversa12 = -covarianza/determinante;
+        double inversa22 = varianzaascisse/determinante;
+        // Adesso calcoliamo il prodotto matriciale tra la matrice dei dati centrati e la matrice
+        // di covarianze. Immagazziniamo la prima e la seconda colonna della matrice risultante
+        // come due vettori separati.
+        std::vector<double> primoprodotto1(taglia);
+        std::vector<double> primoprodotto2(taglia);
+        for (int i = 0; i < taglia; i++){
+            primoprodotto1[i] = ascissecentrate[i]*inversa11+ordinatecentrate[i]*inversa12;
+            primoprodotto2[i] = ascissecentrate[i]*inversa12+ordinatecentrate[i]*inversa22;
         }
-    }
-    // Estraiamo anche di Y la matrice diagonale.
-    std::vector<double> Y_diag(taglia);
-    for (int i = 0; i < taglia; i++){
-        Y_diag[i] = Y[i][i];
-    }
-    // Adesso calcoliamo la matrice Djk che contiene le distanze di Mahalanobis al quadrato.
-    std::vector<std::vector<double>> Djk(taglia, std::vector<double>(taglia));
-    for (int i = 0; i < taglia; i++){
-        for (int j = 0; j < taglia; j++){
-            Djk[i][j] = -2.0*Y[j][i]+Y_diag[i]+Y_diag[j];
+        // Adesso otteniamo la matrice Dj come la matrice diagonale del prodotto fatto prima
+        // moltiplicato per la matrice dei dati centrati trasposta (di fatto completando il prodotto
+        // \bar{x}\Sigma^{-1}\bar{x}^T).
+        std::vector<double> Dj(taglia);
+        for (int i = 0; i < taglia; i++){
+            Dj[i] = primoprodotto1[i]*ascissecentrate[i]+primoprodotto2[i]*ordinatecentrate[i];
         }
-    }
-    // Parametro di smoothing.
-    const double lisciatore = 1.0/std::sqrt(2.0)*std::pow(5.0/4.0, 1.0/6.0)*std::pow(static_cast<double>(taglia), 1.0/6.0);
-    const double lisciatore2 = lisciatore*lisciatore;
-    // Con questi passaggi calcoliamo la statistica test di Henze-Zirkler.
-    double sommakernel = 0.0;
-    double sommakernel2 = 0.0;
-    for (int i = 0; i < taglia; i++){
-        for (int j = 0; j < taglia; j++){
-            sommakernel += std::exp(-lisciatore2/2.0*Djk[i][j]);
+        // Adesso, in modo simile a prima, otteniamo la matrice Y=x\Sigma^{-1}x^T.
+        std::vector<double> primoprodottodecentrato1(taglia);
+        std::vector<double> primoprodottodecentrato2(taglia);
+        for (int i = 0; i < taglia; i++){
+            primoprodottodecentrato1[i] = ascisse[i]*inversa11+ordinate[i]*inversa12;
+            primoprodottodecentrato2[i] = ascisse[i]*inversa12+ordinate[i]*inversa22;
         }
-        sommakernel2 += std::exp(-lisciatore2/(2.0+2.0*lisciatore2)*Dj[i]);
+        std::vector<std::vector<double>> Y(taglia, std::vector<double>(taglia));
+        for (int i = 0; i < taglia; i++){
+            for (int j = 0; j < taglia; j++){
+                Y[i][j] = primoprodottodecentrato1[j]*ascisse[i]+primoprodottodecentrato2[j]*ordinate[i];
+            }
+        }
+        // Estraiamo anche di Y la matrice diagonale.
+        std::vector<double> Y_diag(taglia);
+        for (int i = 0; i < taglia; i++){
+            Y_diag[i] = Y[i][i];
+        }
+        // Adesso calcoliamo la matrice Djk che contiene le distanze di Mahalanobis al quadrato.
+        std::vector<std::vector<double>> Djk(taglia, std::vector<double>(taglia));
+        for (int i = 0; i < taglia; i++){
+            for (int j = 0; j < taglia; j++){
+                Djk[i][j] = -2.0*Y[j][i]+Y_diag[i]+Y_diag[j];
+            }
+        }
+        // Parametro di smoothing.
+        lisciatore = 1.0/std::sqrt(2.0)*std::pow(5.0/4.0, 1.0/6.0)*std::pow(static_cast<double>(taglia), 1.0/6.0);
+        lisciatore2 = lisciatore*lisciatore;
+        // Con questi passaggi calcoliamo la statistica test di Henze-Zirkler.
+        double sommakernel = 0.0;
+        double sommakernel2 = 0.0;
+        for (int i = 0; i < taglia; i++){
+            for (int j = 0; j < taglia; j++){
+                sommakernel += std::exp(-lisciatore2/2.0*Djk[i][j]);
+            }
+            sommakernel2 += std::exp(-lisciatore2/(2.0+2.0*lisciatore2)*Dj[i]);
+        }
+        hz = sommakernel/taglia-2.0*sommakernel2/(1.0+lisciatore2)+taglia/(1.0+2.0*lisciatore2);
     }
-    const double hz = sommakernel/taglia-2.0*sommakernel2/(1.0+lisciatore2)+taglia/(1.0+2.0*lisciatore2);
     // Adesso calcoliamo la media e la varianza della log-normale.
     const double wb = (1.0+lisciatore2)*(1.0+3.0*lisciatore2);
     const double a = 1.0+2.0*lisciatore2;
     const double lisciatore4 = lisciatore2*lisciatore2;
     const double a2 = a*a;
     const double mu = 1.0-(1.0+2.0*lisciatore2/a+8.0*lisciatore4/(2.0*a2))/a;
-    const double si2 = 2.0/(1.0+4.0*lisciatore2)+2.0/a2*(1.0+4.0*lisciatore4/a2+24.0*lisciatore4*lisciatore4
+    double si2 = 2.0/(1.0+4.0*lisciatore2)+2.0/a2*(1.0+4.0*lisciatore4/a2+24.0*lisciatore4*lisciatore4
         /(4.0*a2*a2))-4.0/wb*(1.0+6.0*lisciatore4/(2.0*wb)+8.0*lisciatore4*lisciatore4/(2.0*wb*wb));
-    const double mu2 = mu*mu;
+    double mu2 = mu*mu;
+    if (si2 < 1e-14){si2 = 1e-14;}
+    if (mu2 < 1e-14){mu2 = 1e-14;}
     if (si2/mu2 < 0.0 || si2+mu2 == 0.0){throw std::runtime_error("Problemi nei calcoli per il test di Henze-Zirkler");}
     double pmu = std::log(std::sqrt(mu2*mu2/(si2+mu2)));
     double psi = std::sqrt(std::log(1.0+si2/mu2));
@@ -652,9 +677,9 @@ bool testmardia(const std::vector<double> &ascisse, const std::vector<double> &o
         varianzaordinate += differenzaordinate*differenzaordinate;
         covarianza += differenzaascisse*differenzaordinate;
     }
-    varianzaascisse /= taglia - 1;
-    varianzaordinate /= taglia - 1;
-    covarianza /= taglia - 1;
+    varianzaascisse /= taglia;
+    varianzaordinate /= taglia;
+    covarianza /= taglia;
     double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
     if (determinante < 0.000001){
         varianzaascisse += 0.000001;
@@ -707,9 +732,9 @@ bool testmardia(const std::vector<double> &ascisse, const std::vector<double> &o
         asimmetria = taglia*b1/6.0;
     }
     // La curtosi, nel caso p=2, è pari a (b2-8)\sqrt{n/64}.
-    const double curtosi = (b2-8.0)*std::sqrt(taglia/64.0);
+    const double curtosi = (b2-8.0*(taglia-1.0)/(taglia+1.0))*std::sqrt(taglia/64.0);
     // L'ipotesi nulla è rifiutata se l'asimmetria o la curtosi sono sopra le rispettive soglie critiche.
-    return asimmetria < sogliaasimmetria && curtosi < sogliacurtosi;
+    return asimmetria < sogliaasimmetria && curtosi < sogliacurtosi && curtosi > -sogliacurtosi;
 }
 
 
@@ -817,7 +842,7 @@ void calcolabetatesthenzezirkler(const int taglia, const std::string& distribuzi
             }
         } else if (distribuzione == "uniforme"){
             // L'estrazione da un'uniforme, anche bivariata, è banale.
-            std::uniform_real_distribution<> uniforme(-1, 1);
+            std::uniform_real_distribution<> uniforme(-1.0, 1.0);
             for (int i = 0; i < taglia; i++){
                 campioneascisse[i] = uniforme(generatore);
                 campioneordinate[i] = uniforme(generatore);
@@ -831,7 +856,7 @@ void calcolabetatesthenzezirkler(const int taglia, const std::string& distribuzi
             std::uniform_real_distribution<> uniforme(0, 1);
             std::normal_distribution<> normale1(-distanzacomponenti/2.0, 1.0);
             std::normal_distribution<> normale2(distanzacomponenti/2.0, 1.0);
-            std::normal_distribution<> normale3(0, 1.0);
+            std::normal_distribution<> normale3(0.0, 1.0);
             for (int i = 0; i < taglia; i++){
                 const double u = uniforme(generatore);
                 if (u > 0.5){
@@ -867,10 +892,6 @@ void calcolabetatesthenzezirkler(const int taglia, const std::string& distribuzi
             }
         }
         // Adesso eseguiamo lo stesso processo in testhenzezirkler.
-        // Per prima cosa, ci servono due oggetti: il primo è l'inversa della matrice di covarianze
-        // campionaria del campione, e la matrice dei dati centrati. Per evitare problemi di matrici
-        // singolari, usiamo la regolarizzazione di Tikhonov (questo differisce rispetto all'algoritmo di
-        // Python, che risolve il problema usando l'inversa di Penrose).
         double mediaascisse = 0.0;
         double mediaordinate = 0.0;
         for (int i = 0; i < taglia; i++){
@@ -893,83 +914,88 @@ void calcolabetatesthenzezirkler(const int taglia, const std::string& distribuzi
             varianzaordinate += differenzaordinate*differenzaordinate;
             covarianza += differenzaascisse*differenzaordinate;
         }
-        varianzaascisse /= taglia - 1;
-        varianzaordinate /= taglia - 1;
-        covarianza /= taglia - 1;
-        double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
+        varianzaascisse /= taglia;
+        varianzaordinate /= taglia;
+        covarianza /= taglia;
+        const double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
+        double hz;
+        double lisciatore;
+        double lisciatore2;
         if (determinante < 0.000001){
-            varianzaascisse += 0.000001;
-            varianzaordinate += 0.000001;
-            determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
-        }
-        double inversa11 = varianzaordinate/determinante;
-        double inversa12 = -covarianza/determinante;
-        double inversa22 = varianzaascisse/determinante;
-        // Adesso calcoliamo il prodotto matriciale tra la matrice dei dati centrati e la matrice
-        // di covarianze. Immagazziniamo la prima e la seconda colonna della matrice risultante
-        // come due vettori separati.
-        std::vector<double> primoprodotto1(taglia);
-        std::vector<double> primoprodotto2(taglia);
-        for (int i = 0; i < taglia; i++){
-            primoprodotto1[i] = ascissecentrate[i]*inversa11+ordinatecentrate[i]*inversa12;
-            primoprodotto2[i] = ascissecentrate[i]*inversa12+ordinatecentrate[i]*inversa22;
-        }
-        // Adesso otteniamo la matrice Dj come la matrice diagonale del prodotto fatto prima
-        // moltiplicato per la matrice dei dati centrati trasposta (di fatto completando il prodotto
-        // \bar{x}\Sigma^{-1}\bar{x}^T).
-        std::vector<double> Dj(taglia);
-        for (int i = 0; i < taglia; i++){
-            Dj[i] = primoprodotto1[i]*ascissecentrate[i]+primoprodotto2[i]*ordinatecentrate[i];
-        }
-        // Adesso, in modo simile a prima, otteniamo la matrice Y=x\Sigma^{-1}x^T.
-        std::vector<double> primoprodottodecentrato1(taglia);
-        std::vector<double> primoprodottodecentrato2(taglia);
-        for (int i = 0; i < taglia; i++){
-            primoprodottodecentrato1[i] = campioneascisse[i]*inversa11+campioneordinate[i]*inversa12;
-            primoprodottodecentrato2[i] = campioneascisse[i]*inversa12+campioneordinate[i]*inversa22;
-        }
-        std::vector<std::vector<double>> Y(taglia, std::vector<double>(taglia));
-        for (int i = 0; i < taglia; i++){
-            for (int j = 0; j < taglia; j++){
-                Y[i][j] = primoprodottodecentrato1[i]*campioneascisse[i]+
-                    primoprodottodecentrato2[i]*campioneordinate[i];
+            hz = 4.0*taglia;
+            lisciatore = 1.0/std::sqrt(2.0)*std::pow(5.0/4.0, 1.0/6.0)*std::pow(static_cast<double>(taglia), 1.0/6.0);
+            lisciatore2 = lisciatore*lisciatore;
+        } else {
+            double inversa11 = varianzaordinate/determinante;
+            double inversa12 = -covarianza/determinante;
+            double inversa22 = varianzaascisse/determinante;
+            // Adesso calcoliamo il prodotto matriciale tra la matrice dei dati centrati e la matrice
+            // di covarianze. Immagazziniamo la prima e la seconda colonna della matrice risultante
+            // come due vettori separati.
+            std::vector<double> primoprodotto1(taglia);
+            std::vector<double> primoprodotto2(taglia);
+            for (int i = 0; i < taglia; i++){
+                primoprodotto1[i] = ascissecentrate[i]*inversa11+ordinatecentrate[i]*inversa12;
+                primoprodotto2[i] = ascissecentrate[i]*inversa12+ordinatecentrate[i]*inversa22;
             }
-        }
-        // Estraiamo anche di Y la matrice diagonale.
-        std::vector<double> Y_diag(taglia);
-        for (int i = 0; i < taglia; i++){
-            Y_diag[i] = Y[i][i];
-        }
-        // Adesso calcoliamo la matrice Djk che contiene le distanze di Mahalanobis al quadrato.
-        std::vector<std::vector<double>> Djk(taglia, std::vector<double>(taglia));
-        for (int i = 0; i < taglia; i++){
-            for (int j = 0; j < taglia; j++){
-                Djk[i][j] = -2.0*Y[j][i]+Y_diag[i]+Y_diag[j];
+            // Adesso otteniamo la matrice Dj come la matrice diagonale del prodotto fatto prima
+            // moltiplicato per la matrice dei dati centrati trasposta (di fatto completando il prodotto
+            // \bar{x}\Sigma^{-1}\bar{x}^T).
+            std::vector<double> Dj(taglia);
+            for (int i = 0; i < taglia; i++){
+                Dj[i] = primoprodotto1[i]*ascissecentrate[i]+primoprodotto2[i]*ordinatecentrate[i];
             }
-        }
-        // Parametro di smoothing.
-        const double lisciatore = 1.0/std::sqrt(2.0)*std::pow(5.0/4.0, 1.0/6.0)*std::pow(taglia, 1.0/6.0);
-        const double lisciatore2 = lisciatore*lisciatore;
-        // Con questi passaggi calcoliamo la statistica test di Henze-Zirkler.
-        double sommakernel = 0.0;
-        double sommakernel2 = 0.0;
-        for (int i = 0; i < taglia; i++){
-            for (int j = 0; j < taglia; j++){
-                sommakernel += std::exp(-lisciatore2/2.0*Djk[i][j]);
+            // Adesso, in modo simile a prima, otteniamo la matrice Y=x\Sigma^{-1}x^T.
+            std::vector<double> primoprodottodecentrato1(taglia);
+            std::vector<double> primoprodottodecentrato2(taglia);
+            for (int i = 0; i < taglia; i++){
+                primoprodottodecentrato1[i] = campioneascisse[i]*inversa11+campioneordinate[i]*inversa12;
+                primoprodottodecentrato2[i] = campioneascisse[i]*inversa12+campioneordinate[i]*inversa22;
             }
-            sommakernel2 += std::exp(-lisciatore2/(2.0+2.0*lisciatore2)*Dj[i]);
+            std::vector<std::vector<double>> Y(taglia, std::vector<double>(taglia));
+            for (int i = 0; i < taglia; i++){
+                for (int j = 0; j < taglia; j++){
+                    Y[i][j] = primoprodottodecentrato1[j]*campioneascisse[i]+primoprodottodecentrato2[j]*campioneordinate[i];
+                }
+            }
+            // Estraiamo anche di Y la matrice diagonale.
+            std::vector<double> Y_diag(taglia);
+            for (int i = 0; i < taglia; i++){
+                Y_diag[i] = Y[i][i];
+            }
+            // Adesso calcoliamo la matrice Djk che contiene le distanze di Mahalanobis al quadrato.
+            std::vector<std::vector<double>> Djk(taglia, std::vector<double>(taglia));
+            for (int i = 0; i < taglia; i++){
+                for (int j = 0; j < taglia; j++){
+                    Djk[i][j] = -2.0*Y[j][i]+Y_diag[i]+Y_diag[j];
+                }
+            }
+            // Parametro di smoothing.
+            lisciatore = 1.0/std::sqrt(2.0)*std::pow(5.0/4.0, 1.0/6.0)*std::pow(static_cast<double>(taglia), 1.0/6.0);
+            lisciatore2 = lisciatore*lisciatore;
+            // Con questi passaggi calcoliamo la statistica test di Henze-Zirkler.
+            double sommakernel = 0.0;
+            double sommakernel2 = 0.0;
+            for (int i = 0; i < taglia; i++){
+                for (int j = 0; j < taglia; j++){
+                    sommakernel += std::exp(-lisciatore2/2.0*Djk[i][j]);
+                }
+                sommakernel2 += std::exp(-lisciatore2/(2.0+2.0*lisciatore2)*Dj[i]);
+            }
+            hz = sommakernel/taglia-2.0*sommakernel2/(1.0+lisciatore2)+taglia/(1.0+2.0*lisciatore2);
         }
-        const double hz = sommakernel/taglia-2.0*sommakernel2/(1.0+lisciatore2)+taglia/(1.0+2.0*lisciatore2);
         // Adesso calcoliamo la media e la varianza della log-normale.
         const double wb = (1.0+lisciatore2)*(1.0+3.0*lisciatore2);
         const double a = 1.0+2.0*lisciatore2;
         const double lisciatore4 = lisciatore2*lisciatore2;
         const double a2 = a*a;
         const double mu = 1.0-(1.0+2.0*lisciatore2/a+8.0*lisciatore4/(2.0*a2))/a;
-        const double si2 = 2.0/(1.0+4.0*lisciatore2)+2.0/a2*(1.0+4.0*lisciatore4/a2+24.0*lisciatore4*lisciatore4
-            /(4.0*a2*a2))-4.0/wb*(1.0+6.0*lisciatore4/(2.0*wb)+8.0*lisciatore4*lisciatore4/(2*wb*wb));
-        const double mu2 = mu*mu;
-        if (si2+mu2 == 0.0 || si2/mu2 < 0.0){throw std::runtime_error("Problemi nei calcoli del test di Henze-Zirkler");}
+        double si2 = 2.0/(1.0+4.0*lisciatore2)+2.0/a2*(1.0+4.0*lisciatore4/a2+24.0*lisciatore4*lisciatore4
+            /(4.0*a2*a2))-4.0/wb*(1.0+6.0*lisciatore4/(2.0*wb)+8.0*lisciatore4*lisciatore4/(2.0*wb*wb));
+        double mu2 = mu*mu;
+        if (si2 < 1e-14){si2 = 1e-14;}
+        if (mu2 < 1e-14){mu2 = 1e-14;}
+        if (si2/mu2 < 0.0 || si2+mu2 == 0.0){throw std::runtime_error("Problemi nei calcoli per il test di Henze-Zirkler");}
         double pmu = std::log(std::sqrt(mu2*mu2/(si2+mu2)));
         double psi = std::sqrt(std::log(1.0+si2/mu2));
         statistiche[numerothread*iterazioni+volta] = {hz, psi, std::exp(pmu)};
@@ -1122,7 +1148,7 @@ int calcolabetatestmardia(const int iterazioni, const int taglia, const std::str
             }
         } else if (distribuzione == "uniforme"){
             // L'estrazione da un'uniforme, anche bivariata, è banale.
-            std::uniform_real_distribution<> uniforme(-1, 1);
+            std::uniform_real_distribution<> uniforme(-1.0, 1.0);
             for (int i = 0; i < taglia; i++){
                 campioneascisse[i] = uniforme(generatore);
                 campioneordinate[i] = uniforme(generatore);
@@ -1133,10 +1159,10 @@ int calcolabetatestmardia(const int iterazioni, const int taglia, const std::str
             // pari alla matrice identità; inoltre, la media delle ordinate sarà entrambe nulla. Solo
             // le medie delle ascisse avranno distanza pari a distanzacomponenti. L'algoritmo
             // per generare il campione date queste premesse è noto e banale.
-            std::uniform_real_distribution<> uniforme(0, 1);
+            std::uniform_real_distribution<> uniforme(0.0, 1.0);
             std::normal_distribution<> normale1(-distanzacomponenti/2.0, 1.0);
             std::normal_distribution<> normale2(distanzacomponenti/2.0, 1.0);
-            std::normal_distribution<> normale3(0, 1.0);
+            std::normal_distribution<> normale3(0.0, 1.0);
             for (int i = 0; i < taglia; i++){
                 const double u = uniforme(generatore);
                 if (u > 0.5){
@@ -1191,9 +1217,9 @@ int calcolabetatestmardia(const int iterazioni, const int taglia, const std::str
             varianzaordinate += differenzaordinate*differenzaordinate;
             covarianza += differenzaascisse*differenzaordinate;
         }
-        varianzaascisse /= taglia - 1;
-        varianzaordinate /= taglia - 1;
-        covarianza /= taglia - 1;
+        varianzaascisse /= taglia;
+        varianzaordinate /= taglia;
+        covarianza /= taglia;
         double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
         if (determinante < 0.000001){
             varianzaascisse += 0.000001;
@@ -1214,11 +1240,13 @@ int calcolabetatestmardia(const int iterazioni, const int taglia, const std::str
             ordinatecentrate[i] = campioneordinate[i]-mediaordinate;
         }
         std::vector<double> sommandi(taglia*taglia);
+        int indice = 0;
         for (int i = 0; i < taglia; i++){
             for (int j = 0; j < taglia; j++){
                 const double primoprodotto1 = ascissecentrate[i]*inversa11+ordinatecentrate[i]*inversa12;
                 const double primoprodotto2 = ascissecentrate[i]*inversa12+ordinatecentrate[i]*inversa22;
-                sommandi[i*taglia+j] = primoprodotto1*ascissecentrate[j]+primoprodotto2*ordinatecentrate[j];
+                sommandi[indice] = primoprodotto1*ascissecentrate[j]+primoprodotto2*ordinatecentrate[j];
+                indice++;
             }
         }
         // b_{12}=\sum_i\sum_jm^3_{ij}/n^2:
@@ -1244,9 +1272,9 @@ int calcolabetatestmardia(const int iterazioni, const int taglia, const std::str
             asimmetria = taglia*b1/6.0;
         }
         // La curtosi, nel caso p=2, è pari a (b2-8)\sqrt{n/64}.
-        const double curtosi = (b2-8.0)*std::sqrt(taglia/64.0);
+        const double curtosi = (b2-8.0*(taglia-1.0)/(taglia+1.0))*std::sqrt(taglia/64.0);
         // L'ipotesi nulla è rifiutata se l'asimmetria o la curtosi sono sopra le rispettive soglie critiche.
-        if (asimmetria < sogliaasimmetria && curtosi < sogliacurtosi) {
+        if (asimmetria < sogliaasimmetria && curtosi < sogliacurtosi && curtosi > -sogliacurtosi) {
             accettazioni++;
         }
     }
@@ -1340,83 +1368,88 @@ void calcolaalfaverohenzezirkler(const int taglia, const int iterazioni, const i
             varianzaordinate += differenzaordinate*differenzaordinate;
             covarianza += differenzaascisse*differenzaordinate;
         }
-        varianzaascisse /= taglia - 1;
-        varianzaordinate /= taglia - 1;
-        covarianza /= taglia - 1;
-        double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
+        varianzaascisse /= taglia;
+        varianzaordinate /= taglia;
+        covarianza /= taglia;
+        const double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
+        double hz;
+        double lisciatore;
+        double lisciatore2;
         if (determinante < 0.000001){
-            varianzaascisse += 0.000001;
-            varianzaordinate += 0.000001;
-            determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
-        }
-        double inversa11 = varianzaordinate/determinante;
-        double inversa12 = -covarianza/determinante;
-        double inversa22 = varianzaascisse/determinante;
-        // Adesso calcoliamo il prodotto matriciale tra la matrice dei dati centrati e la matrice
-        // di covarianze. Immagazziniamo la prima e la seconda colonna della matrice risultante
-        // come due vettori separati.
-        std::vector<double> primoprodotto1(taglia);
-        std::vector<double> primoprodotto2(taglia);
-        for (int i = 0; i < taglia; i++){
-            primoprodotto1[i] = ascissecentrate[i]*inversa11+ordinatecentrate[i]*inversa12;
-            primoprodotto2[i] = ascissecentrate[i]*inversa12+ordinatecentrate[i]*inversa22;
-        }
-        // Adesso otteniamo la matrice Dj come la matrice diagonale del prodotto fatto prima
-        // moltiplicato per la matrice dei dati centrati trasposta (di fatto completando il prodotto
-        // \bar{x}\Sigma^{-1}\bar{x}^T).
-        std::vector<double> Dj(taglia);
-        for (int i = 0; i < taglia; i++){
-            Dj[i] = primoprodotto1[i]*ascissecentrate[i]+primoprodotto2[i]*ordinatecentrate[i];
-        }
-        // Adesso, in modo simile a prima, otteniamo la matrice Y=x\Sigma^{-1}x^T.
-        std::vector<double> primoprodottodecentrato1(taglia);
-        std::vector<double> primoprodottodecentrato2(taglia);
-        for (int i = 0; i < taglia; i++){
-            primoprodottodecentrato1[i] = campioneascisse[i]*inversa11+campioneordinate[i]*inversa12;
-            primoprodottodecentrato2[i] = campioneascisse[i]*inversa12+campioneordinate[i]*inversa22;
-        }
-        std::vector<std::vector<double>> Y(taglia, std::vector<double>(taglia));
-        for (int i = 0; i < taglia; i++){
-            for (int j = 0; j < taglia; j++){
-                Y[i][j] = primoprodottodecentrato1[i]*campioneascisse[i]+
-                    primoprodottodecentrato2[i]*campioneordinate[i];
+            hz = 4.0*taglia;
+            lisciatore = 1.0/std::sqrt(2.0)*std::pow(5.0/4.0, 1.0/6.0)*std::pow(static_cast<double>(taglia), 1.0/6.0);
+            lisciatore2 = lisciatore*lisciatore;
+        } else {
+            double inversa11 = varianzaordinate/determinante;
+            double inversa12 = -covarianza/determinante;
+            double inversa22 = varianzaascisse/determinante;
+            // Adesso calcoliamo il prodotto matriciale tra la matrice dei dati centrati e la matrice
+            // di covarianze. Immagazziniamo la prima e la seconda colonna della matrice risultante
+            // come due vettori separati.
+            std::vector<double> primoprodotto1(taglia);
+            std::vector<double> primoprodotto2(taglia);
+            for (int i = 0; i < taglia; i++){
+                primoprodotto1[i] = ascissecentrate[i]*inversa11+ordinatecentrate[i]*inversa12;
+                primoprodotto2[i] = ascissecentrate[i]*inversa12+ordinatecentrate[i]*inversa22;
             }
-        }
-        // Estraiamo anche di Y la matrice diagonale.
-        std::vector<double> Y_diag(taglia);
-        for (int i = 0; i < taglia; i++){
-            Y_diag[i] = Y[i][i];
-        }
-        // Adesso calcoliamo la matrice Djk che contiene le distanze di Mahalanobis al quadrato.
-        std::vector<std::vector<double>> Djk(taglia, std::vector<double>(taglia));
-        for (int i = 0; i < taglia; i++){
-            for (int j = 0; j < taglia; j++){
-                Djk[i][j] = -2.0*Y[j][i]+Y_diag[i]+Y_diag[j];
+            // Adesso otteniamo la matrice Dj come la matrice diagonale del prodotto fatto prima
+            // moltiplicato per la matrice dei dati centrati trasposta (di fatto completando il prodotto
+            // \bar{x}\Sigma^{-1}\bar{x}^T).
+            std::vector<double> Dj(taglia);
+            for (int i = 0; i < taglia; i++){
+                Dj[i] = primoprodotto1[i]*ascissecentrate[i]+primoprodotto2[i]*ordinatecentrate[i];
             }
-        }
-        // Parametro di smoothing.
-        const double lisciatore = 1.0/std::sqrt(2.0)*std::pow(5.0/4.0, 1.0/6.0)*std::pow(taglia, 1.0/6.0);
-        const double lisciatore2 = lisciatore*lisciatore;
-        // Con questi passaggi calcoliamo la statistica test di Henze-Zirkler.
-        double sommakernel = 0.0;
-        double sommakernel2 = 0.0;
-        for (int i = 0; i < taglia; i++){
-            for (int j = 0; j < taglia; j++){
-                sommakernel += std::exp(-lisciatore2/2.0*Djk[i][j]);
+            // Adesso, in modo simile a prima, otteniamo la matrice Y=x\Sigma^{-1}x^T.
+            std::vector<double> primoprodottodecentrato1(taglia);
+            std::vector<double> primoprodottodecentrato2(taglia);
+            for (int i = 0; i < taglia; i++){
+                primoprodottodecentrato1[i] = campioneascisse[i]*inversa11+campioneordinate[i]*inversa12;
+                primoprodottodecentrato2[i] = campioneascisse[i]*inversa12+campioneordinate[i]*inversa22;
             }
-            sommakernel2 += std::exp(-lisciatore2/(2.0+2.0*lisciatore2)*Dj[i]);
+            std::vector<std::vector<double>> Y(taglia, std::vector<double>(taglia));
+            for (int i = 0; i < taglia; i++){
+                for (int j = 0; j < taglia; j++){
+                    Y[i][j] = primoprodottodecentrato1[j]*campioneascisse[i]+primoprodottodecentrato2[j]*campioneordinate[i];
+                }
+            }
+            // Estraiamo anche di Y la matrice diagonale.
+            std::vector<double> Y_diag(taglia);
+            for (int i = 0; i < taglia; i++){
+                Y_diag[i] = Y[i][i];
+            }
+            // Adesso calcoliamo la matrice Djk che contiene le distanze di Mahalanobis al quadrato.
+            std::vector<std::vector<double>> Djk(taglia, std::vector<double>(taglia));
+            for (int i = 0; i < taglia; i++){
+                for (int j = 0; j < taglia; j++){
+                    Djk[i][j] = -2.0*Y[j][i]+Y_diag[i]+Y_diag[j];
+                }
+            }
+            // Parametro di smoothing.
+            lisciatore = 1.0/std::sqrt(2.0)*std::pow(5.0/4.0, 1.0/6.0)*std::pow(static_cast<double>(taglia), 1.0/6.0);
+            lisciatore2 = lisciatore*lisciatore;
+            // Con questi passaggi calcoliamo la statistica test di Henze-Zirkler.
+            double sommakernel = 0.0;
+            double sommakernel2 = 0.0;
+            for (int i = 0; i < taglia; i++){
+                for (int j = 0; j < taglia; j++){
+                    sommakernel += std::exp(-lisciatore2/2.0*Djk[i][j]);
+                }
+                sommakernel2 += std::exp(-lisciatore2/(2.0+2.0*lisciatore2)*Dj[i]);
+            }
+            hz = sommakernel/taglia-2.0*sommakernel2/(1.0+lisciatore2)+taglia/(1.0+2.0*lisciatore2);
         }
-        const double hz = sommakernel/taglia-2.0*sommakernel2/(1.0+lisciatore2)+taglia/(1.0+2.0*lisciatore2);
         // Adesso calcoliamo la media e la varianza della log-normale.
         const double wb = (1.0+lisciatore2)*(1.0+3.0*lisciatore2);
         const double a = 1.0+2.0*lisciatore2;
         const double lisciatore4 = lisciatore2*lisciatore2;
         const double a2 = a*a;
         const double mu = 1.0-(1.0+2.0*lisciatore2/a+8.0*lisciatore4/(2.0*a2))/a;
-        const double si2 = 2.0/(1.0+4.0*lisciatore2)+2.0/a2*(1.0+4.0*lisciatore4/a2+24.0*lisciatore4*lisciatore4
-            /(4.0*a2*a2))-4.0/wb*(1.0+6.0*lisciatore4/(2.0*wb)+8.0*lisciatore4*lisciatore4/(2*wb*wb));
-        const double mu2 = mu*mu;
-        if (si2+mu2 == 0.0 || si2/mu2 < 0.0){throw std::runtime_error("Problemi nei calcoli per il test di Henze-Zirkler");}
+        double si2 = 2.0/(1.0+4.0*lisciatore2)+2.0/a2*(1.0+4.0*lisciatore4/a2+24.0*lisciatore4*lisciatore4
+            /(4.0*a2*a2))-4.0/wb*(1.0+6.0*lisciatore4/(2.0*wb)+8.0*lisciatore4*lisciatore4/(2.0*wb*wb));
+        double mu2 = mu*mu;
+        if (si2 < 1e-14){si2 = 1e-14;}
+        if (mu2 < 1e-14){mu2 = 1e-14;}
+        if (si2/mu2 < 0.0 || si2+mu2 == 0.0){throw std::runtime_error("Problemi nei calcoli per il test di Henze-Zirkler");}
         double pmu = std::log(std::sqrt(mu2*mu2/(si2+mu2)));
         double psi = std::sqrt(std::log(1.0+si2/mu2));
         std::array<double, 3> output = {hz, psi, std::exp(pmu)};
@@ -1441,7 +1474,7 @@ std::vector<std::array<double, 3>> alfaverohenzezirkler(const int iterazioni, co
     // Ora facciamo partire i thread; l'ultimo farà alcune iterazioni in più, che devono essere passate
     // come argomento separato.
     for (int i = 0; i < numerothread - 1; i++){
-        thread[i] = std::thread([=, &statistiche, &i](){
+        thread[i] = std::thread([=, &statistiche](){
             calcolaalfaverohenzezirkler(taglia, volteperthread, 0, std::ref(statistiche), i);
         });
     }
@@ -1493,16 +1526,16 @@ int calcolaalfaverotestmardia(const int iterazioni, const int taglia, const doub
         double varianzaascisse = 0.0;
         double varianzaordinate = 0.0;
         double covarianza = 0.0;
-        for (int j = 0; j < taglia; j++){
-            const double differenzaascisse = campioneascisse[j]-mediaascisse;
-            const double differenzaordinate = campioneordinate[j]-mediaordinate;
+        for (int i = 0; i < taglia; i++){
+            const double differenzaascisse = campioneascisse[i]-mediaascisse;
+            const double differenzaordinate = campioneordinate[i]-mediaordinate;
             varianzaascisse += differenzaascisse*differenzaascisse;
             varianzaordinate += differenzaordinate*differenzaordinate;
             covarianza += differenzaascisse*differenzaordinate;
         }
-        varianzaascisse /= taglia - 1;
-        varianzaordinate /= taglia - 1;
-        covarianza /= taglia - 1;
+        varianzaascisse /= taglia;
+        varianzaordinate /= taglia;
+        covarianza /= taglia;
         double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
         if (determinante < 0.000001){
             varianzaascisse += 0.000001;
@@ -1518,29 +1551,31 @@ int calcolaalfaverotestmardia(const int iterazioni, const int taglia, const doub
         // salviamo gli m_{ij} ottenuti da questi nel vettore sommandi, che sarà piatto.
         std::vector<double> ascissecentrate(taglia);
         std::vector<double> ordinatecentrate(taglia);
-        for (int j = 0; j < taglia; j++){
-            ascissecentrate[j] = campioneascisse[j]-mediaascisse;
-            ordinatecentrate[j] = campioneordinate[j]-mediaordinate;
+        for (int i = 0; i < taglia; i++){
+            ascissecentrate[i] = campioneascisse[i]-mediaascisse;
+            ordinatecentrate[i] = campioneordinate[i]-mediaordinate;
         }
         std::vector<double> sommandi(taglia*taglia);
-        for (int j = 0; j < taglia; j++){
-            for (int k = 0; k < taglia; k++){
-                const double primoprodotto1 = ascissecentrate[j]*inversa11+ordinatecentrate[j]*inversa12;
-                const double primoprodotto2 = ascissecentrate[j]*inversa12+ordinatecentrate[j]*inversa22;
-                sommandi[j*taglia+k] = primoprodotto1*ascissecentrate[k]+primoprodotto2*ordinatecentrate[k];
+        int indice = 0;
+        for (int i = 0; i < taglia; i++){
+            for (int j = 0; j < taglia; j++){
+                const double primoprodotto1 = ascissecentrate[i]*inversa11+ordinatecentrate[i]*inversa12;
+                const double primoprodotto2 = ascissecentrate[i]*inversa12+ordinatecentrate[i]*inversa22;
+                sommandi[indice] = primoprodotto1*ascissecentrate[j]+primoprodotto2*ordinatecentrate[j];
+                indice++;
             }
         }
         // b_{12}=\sum_i\sum_jm^3_{ij}/n^2:
         double b1 = 0.0;
-        for (int j = 0; j < taglia*taglia; j++){
-            const double sommando = sommandi[j];
+        for (int i = 0; i < taglia*taglia; i++){
+            const double sommando = sommandi[i];
             b1 += sommando*sommando*sommando;
         }
         b1 /= taglia*taglia;
         // b_{22}=\sum_im^2_{ij}/n:
         double b2 = 0.0;
-        for (int j = 0; j < taglia; j++){
-            const double sommando = sommandi[j*taglia+j];
+        for (int i = 0; i < taglia; i++){
+            const double sommando = sommandi[i*taglia+i];
             b2 += sommando*sommando;
         }
         b2 /= taglia;
@@ -1553,9 +1588,9 @@ int calcolaalfaverotestmardia(const int iterazioni, const int taglia, const doub
             asimmetria = taglia*b1/6.0;
         }
         // La curtosi, nel caso p=2, è pari a (b2-8)\sqrt{n/64}.
-        const double curtosi = (b2-8.0)*std::sqrt(taglia/64.0);
+        const double curtosi = (b2-8.0*(taglia-1.0)/(taglia+1.0))*std::sqrt(taglia/64.0);
         // L'ipotesi nulla è rifiutata se l'asimmetria o la curtosi sono sopra le rispettive soglie critiche.
-        if (asimmetria < sogliaasimmetria && curtosi < sogliacurtosi) {
+        if (asimmetria < sogliaasimmetria && curtosi < sogliacurtosi && curtosi > -sogliacurtosi){
             accettazioni++;
         }
     }
@@ -1632,7 +1667,20 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
     double &logverosimiglianza, std::vector<int> &clusterfinali, const double sogliaconvergenza,
     std::vector<double> &pigrecifinali, std::vector<double> &muascissefinali, std::vector<double> &muordinatefinali,
     std::vector<double> &sigma11finali, std::vector<double> &sigma22finali, std::vector<double> &sigma12finali,
-    std::vector<int> &nufinali, std::vector<std::vector<double>> &pesifinali) {
+    std::vector<double> &nufinali, std::vector<std::vector<double>> &pesifinali) {
+    if (ascisse.size() != taglia){throw std::runtime_error("ASCISSE");}
+    if (ordinate.size() != taglia){throw std::runtime_error("ORDINATE");}
+    if (clusterfinali.size() != taglia){throw std::runtime_error("CLUSTERFINALI");}
+    if (pigrecifinali.size() != i) {throw std::runtime_error("PIGRECIFINALI");}
+    if (muascissefinali.size() != i){throw std::runtime_error("MUASCISSEFINALI");}
+    if (muordinatefinali.size() != i){throw std::runtime_error("MUORDINATEFINALI");}
+    if (sigma11finali.size() != i){throw std::runtime_error("SIGMA11FINALI");}
+    if (sigma22finali.size() != i){throw std::runtime_error("SIGMA22FINALI");}
+    if (sigma12finali.size() != i){throw std::runtime_error("SIGMA12FINALI");}
+    if (nufinali.size() != i){throw std::runtime_error("NUFINALI");}
+    if (pesifinali.size() != taglia){throw std::runtime_error("PESIFINALI");}
+    if (pesifinali[0].size() != i){throw std::runtime_error("PESIFINALI");}
+    const double piminimo = 2.0/taglia;
     // Prima di inizializzare i parametri, vediamo in che sottoinsieme del piano cartesiano
     // è limitato il campione: troviamo i minimi e i massimi valori registrati delle due coordinate.
     double minimoascisse = ascisse[0];
@@ -1658,9 +1706,10 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
     // Prepariamo i generatori di numeri casuali.
     std::random_device dispositivo;
     std::mt19937 generatore(dispositivo());
+    std::uniform_real_distribution<> inizializzatore(-1.0, 1.0);
     // Se abbiamo scelto di inizializzare con le k-medie:
     if (inizializzazione == "kmeans") {
-        std::uniform_real_distribution<> uniformeascisse(minimoascisse, minimoordinate);
+        std::uniform_real_distribution<> uniformeascisse(minimoascisse, massimoascisse);
         std::uniform_real_distribution<> uniformeordinate(minimoordinate, massimoordinate);
         // Inizializziamo un vettore che conterrà la classificazione delle unità secondo il k-means.
         std::vector<int> clustercorrenti(taglia);
@@ -1738,7 +1787,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                             baricentro = 0;
                             distanzaminima = distanza;
                         } else if (distanza < distanzaminima) {
-                            baricentro = l;
+                            baricentro = m;
                             distanzaminima = distanza;
                         }
                     }
@@ -1791,7 +1840,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                 }
             }
             silhouettemedia /= taglia;
-            if (silhouettemedia < silhouettemediamassima) {
+            if (silhouettemedia > silhouettemediamassima) {
                 silhouettemediamassima = silhouettemedia;
                 clustercorrenti = clusterkmeans;
                 taglieclustercorrenti = tagliecluster;
@@ -1806,7 +1855,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
         std::vector<double> sigma12(i, 0.0);
         // Inizializziamo in ogni caso i gradi di libertà; nel caso abbiamo scelto di usare misture
         // di gaussiane, semplicemente non saranno usati.
-        std::vector<int> nu(i, 5);
+        std::vector<double> nu(i, 5.0);
         for (int k = 0; k < taglia; k++) {
             const int suocluster = clustercorrenti[k];
             muascisse[suocluster] += ascisse[k];
@@ -1814,10 +1863,16 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
         }
         for (int k = 0; k < i; k++) {
             const int tagliadelcluster = taglieclustercorrenti[k];
-            if (tagliadelcluster == 0){continue;}
+            if (tagliadelcluster == 0) {
+                muascisse[k] = inizializzatore(generatore);
+                muordinate[k] = inizializzatore(generatore);
+                pigreci[k] = piminimo;
+                continue;
+            }
             muascisse[k] /= tagliadelcluster;
             muordinate[k] /= tagliadelcluster;
             pigreci[k] = static_cast<double>(tagliadelcluster)/taglia;
+            if (pigreci[k] < piminimo){pigreci[k] = piminimo;}
         }
         for (int k = 0; k < taglia; k++) {
             const int suocluster = clustercorrenti[k];
@@ -1829,7 +1884,12 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
         }
         for (int k = 0; k < i; k++) {
             const int tagliadelcluster = taglieclustercorrenti[k];
-            if (tagliadelcluster < 2){continue;}
+            if (tagliadelcluster < 2) {
+                sigma11[k] = 0.01;
+                sigma22[k] = 0.01;
+                sigma12[k] = 0.0;
+                continue;
+            }
             sigma11[k] /= tagliadelcluster-1;
             sigma22[k] /= tagliadelcluster-1;
             sigma12[k] /= tagliadelcluster-1;
@@ -1842,12 +1902,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
         std::vector<double> inverse22(i);
         std::vector<double> inverse12(i);
         for (int k = 0; k < i; k++) {
-            const double covarianzacluster = sigma12[k];
+            const double prodottovarianze = std::sqrt(sigma11[k]*sigma22[k]);
+            double covarianzacluster = sigma12[k];
+            if (covarianzacluster <= -prodottovarianze || covarianzacluster >= prodottovarianze) {
+                covarianzacluster = std::copysign(prodottovarianze, covarianzacluster);
+                sigma12[k] = covarianzacluster;
+            }
             double determinante = sigma11[k]*sigma22[k]-covarianzacluster*covarianzacluster;
             if (determinante < 0.000001) {
-                determinante = 0.00001*sigma11[k]+0.00001*sigma22[k]+0.0000000001;
-                sigma11[k] += 0.00001;
-                sigma22[k] += 0.00001;
+                sigma11[k] += 0.001;
+                sigma22[k] += 0.001;
+                determinante = sigma11[k]*sigma22[k]-covarianzacluster*covarianzacluster;
             }
             determinanti[k] = determinante;
             inverse11[k] = sigma22[k]/determinante;
@@ -1855,46 +1920,50 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
             inverse12[k] = -covarianzacluster/determinante;
         }
         // Calcoliamo il valore della logverosimiglianza (delle gaussiane o delle t di Student)
-        // con la partizione attuale. Inoltre, salviamo i valori individuali delle verosimiglianze
+        // con la partizione attuale. Inoltre, salviamo i valori individuali delle logverosimiglianze
         // per gli specifici i e g in modo da riusarli dopo.
-        std::vector<std::vector<long double>> verosimiglianzepigreci(taglia, std::vector<long double>(i, 0.0L));
+        std::vector<std::vector<double>> logverosimiglianzepigreci(taglia, std::vector<double>(i, 0.0));
         double logverosimiglianzacorrente = 0.0;
         if (normale) {
             for (int k = 0; k < taglia; k++) {
+                std::vector<double> esponenti(i);
+                double esponentemassimo = -std::numeric_limits<double>::infinity();
                 const double ascissa = ascisse[k];
                 const double ordinata = ordinate[k];
-                long double sommatoria = 0.0L;
                 for (int l = 0; l < i; l++) {
                     const double differenzaascissa = ascissa-muascisse[l];
                     const double differenzaordinata = ordinata-muordinate[l];
-                    const long double esponenziale = -0.5L*(inverse11[l]*differenzaascissa*differenzaascissa+
-                                                     2.0L*inverse12[l]*differenzaascissa*differenzaordinata
-                                                     +inverse22[l]*differenzaordinata*differenzaordinata);
-                    const long double membro = 1.0L/(2.0L*pigreco*std::sqrt(determinanti[l]))*
-                        std::exp(esponenziale)*pigreci[l];
-                    sommatoria += membro;
-                    verosimiglianzepigreci[k][l] = membro;
+                    const double esponente = std::log(pigreci[l])-logduepigreco-(std::log(determinanti[l])+
+                        (inverse11[l]*differenzaascissa*differenzaascissa+2.0*inverse12[l]*differenzaascissa*
+                            differenzaordinata+inverse22[l]*differenzaordinata*differenzaordinata))/2.0;
+                    esponenti[l] = esponente;
+                    if (esponente > esponentemassimo){esponentemassimo = esponente;}
                 }
-                if (sommatoria <= 1e-300L){sommatoria = 1e-300L;}
-                logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                logverosimiglianzepigreci[k] = esponenti;
+                double sommatoria = 0.0;
+                for (int l = 0; l < i; l++){sommatoria += std::exp(esponenti[l]-esponentemassimo);}
+                logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
             }
         } else {
-            const double precostante = std::tgamma(3.5)/(std::tgamma(2.5)*pigreco*5.0);
             for (int k = 0; k < taglia; k++) {
+                std::vector<double> esponenti(i);
+                double esponentemassimo = -std::numeric_limits<double>::infinity();
                 const double ascissa = ascisse[k];
-                const double ordinata = ascisse[k];
-                long double sommatoria = 0.0L;
+                const double ordinata = ordinate[k];
                 for (int l = 0; l < i; l++) {
                     const double differenzaascissa = ascissa-muascisse[l];
                     const double differenzaordinata = ordinata-muordinate[l];
-                    const long double membro = precostante/std::sqrt(determinanti[l])*std::pow(1.0L+0.2L*
-                        (inverse11[l]*differenzaascissa*differenzaascissa+2.0L*inverse12[l]*differenzaascissa*
-                        differenzaordinata+inverse22[l]*differenzaordinata*differenzaordinata), -3.5L)*pigreci[l];
-                    sommatoria += membro;
-                    verosimiglianzepigreci[k][l] = membro;
+                    const double esponente = std::log(pigreci[l])+std::lgamma(3.5)-std::log(5.0*pigreco)-
+                        std::log(determinanti[l])/2.0-std::lgamma(2.5)-3.5*std::log(1.0+(inverse11[l]*
+                            differenzaascissa*differenzaascissa+2.0*inverse12[l]*differenzaascissa*differenzaordinata+
+                                inverse22[l]*differenzaordinata*differenzaordinata)/5.0);
+                    esponenti[l] = esponente;
+                    if (esponente > esponentemassimo){esponentemassimo = esponente;}
                 }
-                if (sommatoria <= 1e-300L){sommatoria = 1e-300L;}
-                logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                logverosimiglianzepigreci[k] = esponenti;
+                double sommatoria = 0.0;
+                for (int l = 0; l < i; l++){sommatoria += std::exp(esponenti[l]-esponentemassimo);}
+                logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
             }
         }
         // Inizializziamo il vettore di pesi w_{ig} e poi avviamo l'algoritmo iterativo di stima dei parametri.
@@ -1910,16 +1979,20 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Iniziamo calcolando i pesi w_{ig}.
                     for (int l = 0; l < taglia; l++) {
                         // Ricordiamo che w_{ig}=\pi_gf_g/\sum_g\pi_gf_g. Abbiamo già immagazzinato
-                        // le quantità \pi_gf_g in verosimiglianzepigreci,
-                        // e "denominatorepesi" sarà la loro somma per i fissato.
-                        std::vector<long double> wi = verosimiglianzepigreci[l];
-                        long double denominatorepesi = 0.0L;
-                        for (int m = 0; m < i; m++) {
-                            denominatorepesi += wi[m];
+                        // le quantità \pi_gf_g in logverosimiglianzepigreci.
+                        const std::vector<double> wi = logverosimiglianzepigreci[l];
+                        double wimassimo = wi[0];
+                        for (int m = 1; m < i; m++) {
+                            if (wi[m] > wimassimo){wimassimo = wi[m];}
                         }
-                        for (int m = 0; m < i; m++) {
-                            if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                            else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                        if (sommatoria <= 0.0) {
+                            for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                        } else {
+                            for (int m = 0; m < i; m++) {
+                                pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));
+                            }
                         }
                     }
                     // Per aggiornare le stime dei parametri, ci serve conoscere \sum_iw_{ig}.
@@ -1946,8 +2019,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double sommawi = sommewi[l];
-                        if (sommawi < 0.000001){sommawi += 0.000001;}
+                        if (sommawi < 0.000001) {
+                            pigreci[l] = piminimo;
+                            muascisse[l] = inizializzatore(generatore);
+                            muordinate[l] = inizializzatore(generatore);
+                            sigma11[l] = 0.0;
+                            sigma22[l] = 0.0;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         pigreci[l] = sommawi/taglia;
+                        if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                         muascisse[l] /= sommawi;
                         muordinate[l] /= sommawi;
                         // Riazzeriamo nello stesso ciclo le stime delle matrici di covarianze.
@@ -1971,7 +2053,12 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double sommawi = sommewi[l];
-                        if (sommawi < 0.000001){sommawi += 0.000001;}
+                        if (sommawi < 0.000001) {
+                            sigma11[l] = 0.01;
+                            sigma22[l] = 0.01;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         sigma11[l] /= sommawi;
                         sigma22[l] /= sommawi;
                         sigma12[l] /= sommawi;
@@ -1979,11 +2066,16 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Delle matrici di covarianze calcoliamo anche le inverse.
                     // Usiamo come sempre la regolarizzazione di Tikhonov.
                     for (int l = 0; l < i; l++) {
-                        const double covarianza = sigma12[l];
+                        const double prodottovarianze = std::sqrt(sigma11[l]*sigma22[l]);
+                        double covarianza = sigma12[l];
+                        if (covarianza < -prodottovarianze || covarianza > prodottovarianze){
+                            covarianza = std::copysign(prodottovarianze, covarianza);
+                            sigma12[l] = covarianza;
+                        }
                         double determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         if (determinante < 0.000001) {
-                            sigma11[l] += 0.00001;
-                            sigma22[l] += 0.00001;
+                            sigma11[l] += 0.001;
+                            sigma22[l] += 0.001;
                             determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         }
                         determinanti[l] = determinante;
@@ -1994,23 +2086,26 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Adesso calcoliamo il valore attuale della logverosimiglianza.
                     logverosimiglianzeprecedenti = {logverosimiglianzeprecedenti[1], logverosimiglianzacorrente};
                     logverosimiglianzacorrente = 0.0;
+                    std::vector<double> precostanti(i);
+                    for (int l = 0; l < i; l++){precostanti[l] = std::log(pigreci[l])-logduepigreco-std::log(determinanti[l])/2.0;}
                     for (int l = 0; l < taglia; l++) {
+                        std::vector<double> esponenti(i);
+                        double esponentemassimo = -std::numeric_limits<double>::infinity();
                         const double ascissa = ascisse[l];
                         const double ordinata = ordinate[l];
-                        long double sommatoria = 0.0;
                         for (int m = 0; m < i; m++) {
                             const double differenzaascissa = ascissa-muascisse[m];
                             const double differenzaordinata = ordinata-muordinate[m];
-                            const long double esponenziale = -0.5L*inverse11[m]*differenzaascissa*differenzaascissa+
-                                2.0L*inverse12[m]*differenzaascissa*differenzaordinata
-                                +inverse22[m]*differenzaordinata*differenzaordinata;
-                            const long double membro = 1.0L/(2.0L*pigreco*std::sqrt(determinanti[m]))*
-                                std::exp(esponenziale)*pigreci[m];
-                            sommatoria += membro;
-                            verosimiglianzepigreci[l][m] = membro;
+                            const double esponente = precostanti[m]-
+                                (inverse11[m]*differenzaascissa*differenzaascissa+2.0*inverse12[m]*differenzaascissa*
+                                    differenzaordinata+inverse22[m]*differenzaordinata*differenzaordinata)/2.0;
+                            esponenti[m] = esponente;
+                            if (esponente > esponentemassimo){esponentemassimo = esponente;}
                         }
-                        if (sommatoria <= 1e-300L){sommatoria = 1e-300L;}
-                        logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                        logverosimiglianzepigreci[l] = esponenti;
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                        logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                     }
                     // Dalla seconda iterazione in poi, utilizziamo l'accelerazione di Aitken
                     // per controllare la convergenza. Se la regola d'arresto |l_\infty-l_{r-1}|<\epsilon
@@ -2018,8 +2113,9 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     if (k != 0) {
                         const double precedente = logverosimiglianzeprecedenti[1];
                         if (precedente-logverosimiglianzeprecedenti[0] < 0.000001){break;}
-                        const double accelerazione = (logverosimiglianzacorrente - precedente) /
-                            (precedente - logverosimiglianzeprecedenti[0]);
+			            double accelerazione = (logverosimiglianzacorrente - precedente) /
+			                (precedente - logverosimiglianzeprecedenti[0]);
+			            if (accelerazione == 1.0) {accelerazione -= 0.000001;}
                         const double linfinito = precedente + 1.0 / (1.0 - accelerazione) *
                             (logverosimiglianzacorrente - precedente);
                         if (std::abs(linfinito - precedente) < sogliaconvergenza) { break; }
@@ -2032,14 +2128,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Per prima cosa sfruttiamo le logverosimiglianze calcolate all'iterazione
                     // precedente per trovare i pesi w_{ig}.
                     for (int l = 0; l < taglia; l++) {
-                        std::vector<long double> wi = verosimiglianzepigreci[l];
-                        long double denominatorepesi = 0.0L;
-                        for (int m = 0; m < i; m++) {
-                            denominatorepesi += wi[m];
+                        const std::vector<double> wi = logverosimiglianzepigreci[l];
+                        double wimassimo = wi[0];
+                        for (int m = 1; m < i; m++){
+                            if (wi[m] > wimassimo){wimassimo = wi[m];}
                         }
-                        for (int m = 0; m < i; m++) {
-                            if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                            else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                        if (sommatoria <= 0.0) {
+                            for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                        } else {
+                            for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-std::log(sommatoria));}
                         }
                     }
                     // Prima di continuare, prepariamoci calcolando le somme dei w_{ig} per ogni g.
@@ -2058,9 +2157,9 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         for (int m = 0; m < i; m++) {
                             const double differenzaascisse = ascissa-muascisse[m];
                             const double differenzaordinate = ordinata-muordinate[m];
-                            const double mahalanobis = std::sqrt(inverse11[m]*differenzaascisse*differenzaascisse+
+                            const double mahalanobis = inverse11[m]*differenzaascisse*differenzaascisse+
                                 inverse12[m]*differenzaascisse*differenzaordinate+
-                                inverse22[m]*differenzaordinate*differenzaordinate);
+                                inverse22[m]*differenzaordinate*differenzaordinate;
                             const double gradi = nu[m];
                             uig[l][m] = (gradi+2.0)/(gradi+mahalanobis);
                         }
@@ -2070,6 +2169,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         muascisse[l] = 0.0;
                         muordinate[l] = 0.0;
                         pigreci[l] = sommewi[l]/taglia;
+                        if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                     }
                     std::vector<double> denominatori(i, 0.0);
                     for (int l = 0; l < taglia; l++) {
@@ -2086,7 +2186,14 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double denominatore = denominatori[l];
-                        if (denominatore < 0.000001){denominatore += 0.000001;}
+                        if (denominatore < 0.000001){
+                            muascisse[l] = inizializzatore(generatore);
+                            muordinate[l] = inizializzatore(generatore);
+                            sigma11[l] = 0.0;
+                            sigma22[l] = 0.0;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         muascisse[l] /= denominatore;
                         muordinate[l] /= denominatore;
                         // Riazzeriamo nello stesso ciclo le stime delle matrici di covarianze.
@@ -2110,18 +2217,28 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double sommawi = sommewi[l];
-                        if (sommawi < 0.000001){sommawi += 0.000001;}
+                        if (sommawi < 0.000001) {
+                            sigma11[l] = 0.01;
+                            sigma22[l] = 0.01;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         sigma11[l] /= sommawi;
                         sigma22[l] /= sommawi;
                         sigma12[l] /= sommawi;
                     }
                     // Inoltre calcoliamo le inverse e i determinanti di tali matrici.
                     for (int l = 0; l < i; l++) {
-                        const double covarianza = sigma12[l];
+                        const double prodottovarianze = std::sqrt(sigma11[l]*sigma22[l]);
+                        double covarianza = sigma12[l];
+                        if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                            covarianza = std::copysign(prodottovarianze, covarianza);
+                            sigma12[l] = covarianza;
+                        }
                         double determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         if (determinante < 0.000001) {
-                            sigma11[l] += 0.000001;
-                            sigma22[l] += 0.000001;
+                            sigma11[l] += 0.001;
+                            sigma22[l] += 0.001;
                             determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         }
                         determinanti[l] = determinante;
@@ -2132,10 +2249,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Per trovare la stima aggiornata dei gradi di libertà, dobbiamo risolvere (con un metodo
                     // iterativo) l'equazione -\psi(\nu/2)+log(\nu/2)+1+(1/\nu)\sum_iw_{ig}(logu_{ig}-u_{ig})+
                     // \psi((\nu+2)/2)-log((\nu+2)/2)=0. Useremo il metodo di Newton, dunque l'equazione di
-                    // aggiornamento sarà x_t=x_{t-1}-f(x_{t-1})/f'(x_{t-1}). Ricordiamo che la derivata di questa
-                    // funzione è -0.5\psi'(\nu/2)+1/\nu-(1/\nu^2)\sum_iw_{ig}(logy_{ig}-u_{ig})+
-                    // 0.5\psi'((\nu+2)/2)-1/(\nu+2). Per ragioni di velocità, calcoleremo le sommatorie prima
-                    // del resto.
+                    // aggiornamento sarà x_t=x_{t-1}-f(x_{t-1})/f'(x_{t-1}).
                     std::vector<double> sommeru(i, 0.0);
                     for (int l = 0; l < taglia; l++) {
                         const std::vector<double> rigapesi = pesi[l];
@@ -2146,94 +2260,83 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                             sommeru[m] += rigapesi[m]*(std::log(u)-u);
                         }
                     }
-                    for (int l = 0; l < i; l++) {
-                        int grado = nu[l];
-                        if (grado < 1){grado = 1;}
-                        double grado2 = grado/2.0;
-                        double grado21 = grado2+1.0;
-                        const double loggrado2 = std::log(grado2);
-                        const double loggrado21 = std::log(grado21);
-                        const double unosugrado2 = 1.0/(grado+2.0);
-                        const double sommaru = sommeru[l];
-                        // Usiamo questo algoritmo per calcolare \psi((\nu+2)/2).
-                        double digamma21 = 0.0;
-                        while (grado21 < 6.0) {
-                            digamma21 -= 1.0 / grado21;
-                            grado21++;
+                    for (int l = 0; l < i; l++){
+                        double grado = nu[l];
+                        if (grado <= 0.0){grado = 0.001;}
+                        const double gradoiniziale = grado;
+                        double grado1 = gradoiniziale/2.0+1.0;
+                        double digamma1 = 0.0;
+                        while (grado1 < 6.0) {
+                            digamma1 -= 1.0/grado1;
+                            grado1++;
                         }
-                        const double xx = 1.0 / grado21;
-                        const double xx2 = xx*xx;
-                        const double xx4 = xx2*xx2;
-                        digamma21 += std::log(grado21)-xx/2.0-xx2/12.0+xx4/120.0-xx4*xx2/252.0;
-                        // Similmente calcoliamo \psi(\nu/2).
-                        double digamma2 = 0.0;
-                        while (grado2 < 6.0) {
-                            digamma2 -= 1 / grado2;
-                            grado2++;
+                        const double g2 = grado1*grado1;
+                        const double g4 = g2*g2;
+                        const double g8 = g4*g4;
+                        digamma1 += std::log(grado1)-1.0/(2.0*grado1)-1.0/(12.0*g2)+1.0/(120.0*g4)-1.0/(252.0*g4*g2)+
+                            1.0/(240.0*g8)-1.0/(132.0*g8*g2);
+                        const double costantenumeratore = digamma1+1.0+sommeru[l]/sommewi[l];
+                        for (int m = 0; m < 20; m++) {
+                            double grado2 = grado/2.0;
+                            double digamma2 = 0.0;
+                            double trigamma = 0.0;
+                            while (grado2 < 6.0) {
+                                digamma2 -= 1.0/grado2;
+                                trigamma += 1.0/(grado2*grado2);
+                                grado2++;
+                            }
+                            const double gg2 = grado2*grado2;
+                            const double gg4 = gg2*gg2;
+                            const double gg8 = gg4*gg4;
+                            digamma2 += std::log(grado2)-1.0/(2.0*grado2)-1.0/(12.0*gg2)+1.0/(120.0*gg4)-
+                                1.0/(252.0*gg4*gg2)+1.0/(240.0*gg8)-1.0/(132.0*gg8*gg2);
+                            trigamma += 1.0/grado2+1.0/(2.0*gg2)+1.0/(6.0*gg2*grado2)-1.0/(30.0*gg4*grado2)+
+                                1.0/(42.0*gg4*gg2*grado2)-1.0/(30.0*gg8*grado2)+10.0/(132.0*gg8*gg2*grado2);
+                            const double logaritmo = std::log(grado/(gradoiniziale+2.0));
+                            const double reciproco = 1.0/grado;
+                            grado -= (costantenumeratore-digamma2+logaritmo)/(reciproco-0.5*trigamma);
+                            if (grado <= 0.0){grado = 0.001;}
+                            if (grado > 200.0){grado = 200.0;}
                         }
-                        const double xxx = 1.0 / grado2;
-                        const double xxx2 = xxx*xxx;
-                        const double xxx4 = xxx2*xxx2;
-                        digamma2 += std::log(grado2)-xxx/2.0-xxx2/12.0+xxx4/120.0-xxx4*xxx2/252.0;
-                        const double numeratore = -digamma2+loggrado2+1.0+sommaru/grado+digamma21-loggrado21;
-                        grado2 = grado/2.0;
-                        // Con quest'altro algoritmo approssimiamo la funzione trigamma, ossia \psi'(\nu/2).
-                        double trigamma2 = 0.0;
-                        while (grado2 < 6.0) {
-                            trigamma2 += 1.0 / (grado2 * grado2);
-                            grado2++;
-                        }
-                        const double xxxx = 1.0 / grado2;
-                        const double xxxx2 = xxxx * xxxx;
-                        trigamma2 += xxxx / 2.0 + xxxx2 / 6.0 - xxxx2 * xxxx2 / 30.0 + xxxx2 * xxxx2 * xxxx2 / 42.0;
-                        // E infine approssimiamo \psi'((\nu+2)/2).
-                        grado21 = grado/2.0+1.0;
-                        double trigamma21 = 0.0;
-                        while (grado21 < 6.0) {
-                            trigamma21 += 1.0/(grado21*grado21);
-                            grado21++;
-                        }
-                        const double xxxxx = 1.0/grado21;
-                        const double xxxxx2 = xxxxx*xxxxx;
-                        trigamma21 += xxxxx/2.0+xxxxx2/6.0-xxxxx2*xxxxx2/30.0+xxxxx2*xxxxx2*xxxxx2/42.0;
-                        const double denominatore = -trigamma2/2.0+1.0/grado-sommaru/(grado*grado)+
-                            trigamma21/2.0-unosugrado2;
-                        if (grado-numeratore/denominatore < 1.0){nu[l] = 1;}
-                        else {nu[l] = static_cast<int>(std::round(grado-numeratore/denominatore));}
+                        nu[l] = grado;
                     }
                     // Ora calcoliamo la logverosimiglianza.
                     logverosimiglianzeprecedenti = {logverosimiglianzeprecedenti[1], logverosimiglianzacorrente};
                     logverosimiglianzacorrente = 0.0;
-                    // Iniziamo calcolando le costanti \Gamma((\nu+2)/2)/(\Gamma(\nu/2)\nu\pi).
                     std::vector<double> precostanti(i);
                     for (int l = 0; l < i; l++) {
-                        const int grado = nu[l];
-                        precostanti[l] = std::tgamma(grado/2.0+1.0)/(std::tgamma(grado/2.0)*grado*pigreco);
+                        const double grado = nu[l];
+                        precostanti[l] = std::log(pigreci[l])+std::lgamma(grado/2.0+1.0)-std::log(grado*pigreco)-
+                            std::log(determinanti[l])/2.0-std::lgamma(grado/2.0);
                     }
                     for (int l = 0; l < taglia; l++) {
+                        std::vector<double> esponenti(i);
+                        double esponentemassimo = -std::numeric_limits<double>::infinity();
                         const double ascissa = ascisse[l];
                         const double ordinata = ordinate[l];
-                        long double sommatoria = 0.0;
                         for (int m = 0; m < i; m++){
-                            const double differenzaascisse = ascissa-muascisse[m];
-                            const double differenzaordinate = ordinata-muordinate[m];
-                            const int grado = nu[m];
-                            const long double membro =  precostanti[m]/std::sqrt(determinanti[m])*std::pow(1.0L+
-                                (inverse11[m]*differenzaascisse*differenzaascisse+2.0L*inverse12[m]*
-                                    differenzaascisse*differenzaordinate+inverse22[m]*differenzaordinate*
-                                    differenzaordinate)/grado, -grado/2.0L-1.0L)*pigreci[m];
-                            sommatoria += membro;
-                            verosimiglianzepigreci[l][m] = membro;
+                            const double differenzaascissa = ascissa-muascisse[m];
+                            const double differenzaordinata = ordinata-muordinate[m];
+                            const double grado = nu[m];
+                            const double esponente = precostanti[m]-(grado+2.0)/2.0*std::log(1.0+
+                                (inverse11[m]*differenzaascissa*differenzaascissa+2.0*inverse12[m]*
+                                    differenzaascissa*differenzaordinata+inverse22[m]*differenzaordinata*
+                                        differenzaordinata)/grado);
+                            esponenti[m] = esponente;
+                            if (esponente > esponentemassimo){esponentemassimo = esponente;}
                         }
-                        if (sommatoria <= 1e-300L){sommatoria = 1e-300L;}
-                        logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                        logverosimiglianzepigreci[l] = esponenti;
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                        logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                     }
                     // Dalla seconda iterazione in poi controlliamo la convergenza con l'accelerazione di Aitken.
                     if (k != 0) {
                         const double precedente = logverosimiglianzeprecedenti[1];
                         if (precedente-logverosimiglianzeprecedenti[0] < 0.000001){break;}
-                        const double accelerazione = (logverosimiglianzacorrente - precedente)/
-                            (precedente - logverosimiglianzeprecedenti[0]);
+			            double accelerazione = (logverosimiglianzacorrente - precedente)/
+			                (precedente - logverosimiglianzeprecedenti[0]);
+			            if (accelerazione == 1.0) {accelerazione -= 0.000001;}
                         const double linfinito = precedente + 1 / (1 - accelerazione) *
                             (logverosimiglianzacorrente - precedente);
                         if (std::abs(linfinito - precedente) < sogliaconvergenza) { break; }
@@ -2282,7 +2385,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
             std::vector<double> sigma11vincenti = sigma11;
             std::vector<double> sigma22vincenti = sigma22;
             std::vector<double> sigma12vincenti = sigma12;
-            std::vector<int> nuvincenti = nu;
+            std::vector<double> nuvincenti = nu;
             std::vector<std::vector<double>> pesivincenti(taglia, pigreci);
             // Se usiamo misture di gaussiane:
             if (normale) {
@@ -2291,16 +2394,18 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Iniziamo calcolando i pesi w_{ig}.
                     for (int l = 0; l < taglia; l++) {
                         // Ricordiamo che w_{ig}=\pi_gf_g/\sum_g\pi_gf_g. Abbiamo già immagazzinato
-                        // le quantità \pi_gf_g in verosimiglianzepigreci,
-                        // e "denominatorepesi" sarà la loro somma per i fissato.
-                        std::vector<long double> wi = verosimiglianzepigreci[l];
-                        long double denominatorepesi = 0.0L;
-                        for (int m = 0; m < i; m++) {
-                            denominatorepesi += wi[m];
+                        // le quantità \pi_gf_g in verosimiglianzepigreci.
+                        std::vector<double> wi = logverosimiglianzepigreci[l];
+                        double wimassimo = wi[0];
+                        for (int m = 1; m < i; m++) {
+                            if (wi[m] > wimassimo){wimassimo = wi[m];}
                         }
-                        for (int m = 0; m < i; m++) {
-                            if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                            else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                        if (sommatoria <= 0.0) {
+                            for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                        } else {
+                            for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                         }
                     }
                     // L'algoritmo SEM differisce dall'EM perché una volta calcolati i pesi w_{ig},
@@ -2339,7 +2444,15 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double sommawi = sommewi[l];
-                        if (sommawi < 0.000001){sommawi += 0.000001;}
+                        if (sommawi < 0.000001){
+                            pigreci[l] = piminimo;
+                            muascisse[l] = inizializzatore(generatore);
+                            muordinate[l] = inizializzatore(generatore);
+                            sigma11[l] = 0.0;
+                            sigma22[l] = 0.0;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         pigreci[l] = sommawi/taglia;
                         muascisse[l] /= sommawi;
                         muordinate[l] /= sommawi;
@@ -2364,7 +2477,12 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double sommawi = sommewi[l];
-                        if (sommawi < 0.000001){sommawi += 0.000001;}
+                        if (sommawi < 0.000001){
+                            sigma11[l] = 0.01;
+                            sigma22[l] = 0.01;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         sigma11[l] /= sommawi;
                         sigma22[l] /= sommawi;
                         sigma12[l] /= sommawi;
@@ -2372,11 +2490,16 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Delle matrici di covarianze calcoliamo anche le inverse.
                     // Usiamo come sempre la regolarizzazione di Tikhonov.
                     for (int l = 0; l < i; l++) {
-                        const double covarianza = sigma12[l];
+                        const double prodottovarianze = std::sqrt(sigma11[l]*sigma22[l]);
+                        double covarianza = sigma12[l];
+                        if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                            covarianza = std::copysign(prodottovarianze, covarianza);
+                            sigma12[l] = covarianza;
+                        }
                         double determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         if (determinante < 0.000001) {
-                            sigma11[l] += 0.00001;
-                            sigma22[l] += 0.00001;
+                            sigma11[l] += 0.001;
+                            sigma22[l] += 0.001;
                             determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         }
                         determinanti[l] = determinante;
@@ -2387,23 +2510,26 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Se abbiamo passato un quarto delle iterazioni, dopo aver calcolato il valore della
                     // logverosimiglianza vediamo se abbiamo superato il record precedente.
                     logverosimiglianzacorrente = 0.0;
+                    std::vector<double> precostanti(i);
+                    for (int l = 0; l < i; l++){precostanti[l] = std::log(pigreci[l])-logduepigreco-std::log(determinanti[l])/2.0;}
                     for (int l = 0; l < taglia; l++) {
+                        std::vector<double> esponenti(i);
+                        double esponentemassimo = -std::numeric_limits<double>::infinity();
                         const double ascissa = ascisse[l];
                         const double ordinata = ordinate[l];
-                        long double sommatoria = 0.0;
                         for (int m = 0; m < i; m++) {
                             const double differenzaascissa = ascissa - muascisse[m];
                             const double differenzaordinata = ordinata - muordinate[m];
-                            const long double esponenziale = -0.5L * inverse11[m] * differenzaascissa * differenzaascissa +
-                                                        2.0L * inverse12[m] * differenzaascissa * differenzaordinata
-                                                        + inverse22[m] * differenzaordinata * differenzaordinata;
-                            const long double membro = 1.0L / (2.0L * pigreco * std::sqrt(determinanti[m])) *
-                                                  std::exp(esponenziale) * pigreci[m];
-                            sommatoria += membro;
-                            verosimiglianzepigreci[l][m] = membro;
+                            const double esponente = precostanti[m]-(inverse11[m]*differenzaascissa*differenzaascissa+
+                                2.0*inverse12[m]*differenzaascissa*differenzaordinata+inverse22[m]*differenzaordinata*
+                                    differenzaordinata)/2.0;
+                            esponenti[m] = esponente;
+                            if (esponente > esponentemassimo){esponentemassimo = esponente;}
                         }
-                        if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                        logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                        logverosimiglianzepigreci[l] = esponenti;
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                        logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                     }
                     if (k > sogliacontrollo && logverosimiglianzacorrente > logverosimiglianzavincente){
                         logverosimiglianzavincente = logverosimiglianzacorrente;
@@ -2427,14 +2553,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Per prima cosa sfruttiamo le logverosimiglianze calcolate all'iterazione
                     // precedente per trovare i pesi w_{ig}.
                     for (int l = 0; l < taglia; l++) {
-                        std::vector<long double> wi = verosimiglianzepigreci[l];
-                        long double denominatorepesi = 0.0L;
-                        for (int m = 0; m < i; m++) {
-                            denominatorepesi += wi[m];
+                        std::vector<double> wi = logverosimiglianzepigreci[l];
+                        double wimassimo = wi[0];
+                        for (int m = 1; m < i; m++) {
+                            if (wi[m] > wimassimo){wimassimo = wi[m];}
                         }
-                        for (int m = 0; m < i; m++) {
-                            if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                            else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                        if (sommatoria <= 0.0) {
+                            for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                        } else {
+                            for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                         }
                     }
                     // L'algoritmo SEM differisce dall'EM perché una volta calcolati i pesi w_{ig},
@@ -2464,9 +2593,9 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         for (int m = 0; m < i; m++) {
                             const double differenzaascisse = ascissa-muascisse[m];
                             const double differenzaordinate = ordinata-muordinate[m];
-                            const double mahalanobis = std::sqrt(inverse11[m]*differenzaascisse*differenzaascisse+
+                            const double mahalanobis = inverse11[m]*differenzaascisse*differenzaascisse+
                                 inverse12[m]*differenzaascisse*differenzaordinate+
-                                inverse22[m]*differenzaordinate*differenzaordinate);
+                                inverse22[m]*differenzaordinate*differenzaordinate;
                             const double gradi = nu[m];
                             uig[l][m] = (gradi+2.0)/(gradi+mahalanobis);
                         }
@@ -2476,6 +2605,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         muascisse[l] = 0.0;
                         muordinate[l] = 0.0;
                         pigreci[l] = sommewi[l]/taglia;
+                        if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                     }
                     std::vector<double> denominatori(i, 0.0);
                     for (int l = 0; l < taglia; l++) {
@@ -2492,7 +2622,14 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double denominatore = denominatori[l];
-                        if (denominatore < 0.000001){denominatore += 0.000001;}
+                        if (denominatore < 0.000001) {
+                            muascisse[l] = inizializzatore(generatore);
+                            muordinate[l] = inizializzatore(generatore);
+                            sigma11[l] = 0.0;
+                            sigma22[l] = 0.0;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         muascisse[l] /= denominatore;
                         muordinate[l] /= denominatore;
                         // Riazzeriamo nello stesso ciclo le stime delle matrici di covarianze.
@@ -2516,18 +2653,28 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double sommawi = sommewi[l];
-                        if (sommawi < 0.000001){sommawi += 0.000001;}
+                        if (sommawi < 0.000001) {
+                            sigma11[l] = 0.01;
+                            sigma22[l] = 0.01;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         sigma11[l] /= sommawi;
                         sigma22[l] /= sommawi;
                         sigma12[l] /= sommawi;
                     }
                     // Inoltre calcoliamo le inverse e i determinanti di tali matrici.
                     for (int l = 0; l < i; l++) {
-                        const double covarianza = sigma12[l];
+                        const double prodottovarianze = std::sqrt(sigma11[l]*sigma22[l]);
+                        double covarianza = sigma12[l];
+                        if (covarianza < -prodottovarianze || covarianza > prodottovarianze){
+                            covarianza = std::copysign(prodottovarianze, covarianza);
+                            sigma12[l] = covarianza;
+                        }
                         double determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         if (determinante < 0.000001) {
-                            sigma11[l] += 0.00001;
-                            sigma22[l] += 0.00001;
+                            sigma11[l] += 0.001;
+                            sigma22[l] += 0.001;
                             determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         }
                         determinanti[l] = determinante;
@@ -2538,10 +2685,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Per trovare la stima aggiornata dei gradi di libertà, dobbiamo risolvere (con un metodo
                     // iterativo) l'equazione -\psi(\nu/2)+log(\nu/2)+1+(1/\nu)\sum_iw_{ig}(logu_{ig}-u_{ig})+
                     // \psi((\nu+2)/2)-log((\nu+2)/2)=0. Useremo il metodo di Newton, dunque l'equazione di
-                    // aggiornamento sarà x_t=x_{t-1}-f(x_{t-1})/f'(x_{t-1}). Ricordiamo che la derivata di questa
-                    // funzione è -0.5\psi'(\nu/2)+1/\nu-(1/\nu^2)\sum_iw_{ig}(logy_{ig}-u_{ig})+
-                    // 0.5\psi'((\nu+2)/2)-1/(\nu+2). Per ragioni di velocità, calcoleremo le sommatorie prima
-                    // del resto.
+                    // aggiornamento sarà x_t=x_{t-1}-f(x_{t-1})/f'(x_{t-1}).
                     std::vector<double> sommeru(i, 0.0);
                     for (int l = 0; l < taglia; l++) {
                         const std::vector<double> rigapseudi = pseudi[l];
@@ -2552,85 +2696,72 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                             sommeru[m] += rigapseudi[m]*(std::log(u)-u);
                         }
                     }
-                    for (int l = 0; l < i; l++) {
-                        int grado = nu[l];
-                        if (grado < 1){grado = 1;}
-                        double grado2 = grado/2.0;
-                        double grado21 = grado2+1.0;
-                        const double loggrado2 = std::log(grado2);
-                        const double loggrado21 = std::log(grado21);
-                        const double unosugrado2 = 1.0/(grado+2.0);
-                        const double sommaru = sommeru[l];
-                        // Usiamo questo algoritmo per calcolare \psi((\nu+2)/2).
-                        double digamma21 = 0.0;
-                        while (grado21 < 6.0) {
-                            digamma21 -= 1.0 / grado21;
-                            grado21++;
+                    for (int l = 0; l < i; l++){
+                        double grado = nu[l];
+                        if (grado <= 0.0){grado = 0.001;}
+                        const double gradoiniziale = grado;
+                        double grado1 = gradoiniziale/2.0+1.0;
+                        double digamma1 = 0.0;
+                        while (grado1 < 6.0) {
+                            digamma1 -= 1.0/grado1;
+                            grado1++;
                         }
-                        const double xx = 1.0 / grado21;
-                        const double xx2 = xx*xx;
-                        const double xx4 = xx2*xx2;
-                        digamma21 += std::log(grado21)-xx/2.0-xx2/12.0+xx4/120.0-xx4*xx2/252.0;
-                        // Similmente calcoliamo \psi(\nu/2).
-                        double digamma2 = 0.0;
-                        while (grado2 < 6.0) {
-                            digamma2 -= 1 / grado2;
-                            grado2++;
+                        const double g2 = grado1*grado1;
+                        const double g4 = g2*g2;
+                        const double g8 = g4*g4;
+                        digamma1 += std::log(grado1)-1.0/(2.0*grado1)-1.0/(12.0*g2)+1.0/(120.0*g4)-1.0/(252.0*g4*g2)+
+                            1.0/(240.0*g8)-1.0/(132.0*g8*g2);
+                        const double costantenumeratore = digamma1+1.0+sommeru[l]/sommewi[l];
+                        for (int m = 0; m < 20; m++) {
+                            double grado2 = grado/2.0;
+                            double digamma2 = 0.0;
+                            double trigamma = 0.0;
+                            while (grado2 < 6.0) {
+                                digamma2 -= 1.0/grado2;
+                                trigamma += 1.0/(grado2*grado2);
+                                grado2++;
+                            }
+                            const double gg2 = grado2*grado2;
+                            const double gg4 = gg2*gg2;
+                            const double gg8 = gg4*gg4;
+                            digamma2 += std::log(grado2)-1.0/(2.0*grado2)-1.0/(12.0*gg2)+1.0/(120.0*gg4)-
+                                1.0/(252.0*gg4*gg2)+1.0/(240.0*gg8)-1.0/(132.0*gg8*gg2);
+                            trigamma += 1.0/grado2+1.0/(2.0*gg2)+1.0/(6.0*gg2*grado2)-1.0/(30.0*gg4*grado2)+
+                                1.0/(42.0*gg4*gg2*grado2)-1.0/(30.0*gg8*grado2)+10.0/(132.0*gg8*gg2*grado2);
+                            const double logaritmo = std::log(grado/(gradoiniziale+2.0));
+                            const double reciproco = 1.0/grado;
+                            grado -= (costantenumeratore-digamma2+logaritmo)/(reciproco-0.5*trigamma);
+                            if (grado <= 0.0){grado = 0.001;}
+                            if (grado > 200.0){grado = 200.0;}
                         }
-                        const double xxx = 1.0 / grado2;
-                        const double xxx2 = xxx*xxx;
-                        const double xxx4 = xxx2*xxx2;
-                        digamma2 += std::log(grado2)-xxx/2.0-xxx2/12.0+xxx4/120.0-xxx4*xxx2/252.0;
-                        const double numeratore = -digamma2+loggrado2+1.0+sommaru/grado+digamma21-loggrado21;
-                        grado2 = grado/2.0;
-                        // Con quest'altro algoritmo approssimiamo la funzione trigamma, ossia \psi'(\nu/2).
-                        double trigamma2 = 0.0;
-                        while (grado2 < 6.0) {
-                            trigamma2 += 1.0 / (grado2 * grado2);
-                            grado2++;
-                        }
-                        const double xxxx = 1.0 / grado2;
-                        const double xxxx2 = xxxx * xxxx;
-                        trigamma2 += xxxx / 2.0 + xxxx2 / 6.0 - xxxx2 * xxxx2 / 30.0 + xxxx2 * xxxx2 * xxxx2 / 42.0;
-                        // E infine approssimiamo \psi'((\nu+2)/2).
-                        grado21 = grado/2.0+1.0;
-                        double trigamma21 = 0.0;
-                        while (grado21 < 6.0) {
-                            trigamma21 += 1.0/(grado21*grado21);
-                            grado21++;
-                        }
-                        const double xxxxx = 1.0/grado21;
-                        const double xxxxx2 = xxxxx*xxxxx;
-                        trigamma21 += xxxxx/2.0+xxxxx2/6.0-xxxxx2*xxxxx2/30.0+xxxxx2*xxxxx2*xxxxx2/42.0;
-                        const double denominatore = -trigamma2/2.0+1.0/grado-sommaru/(grado*grado)+
-                            trigamma21/2.0-unosugrado2;
-                        if (grado-numeratore/denominatore < 1.0){nu[l] = 1;}
-                        else {nu[l] = static_cast<int>(std::round(grado-numeratore/denominatore));}
+                        nu[l] = grado;
                     }
                     logverosimiglianzacorrente = 0.0;
-                    // Iniziamo calcolando le costanti \Gamma((\nu+2)/2)/(\Gamma(\nu/2)\nu\pi).
                     std::vector<double> precostanti(i);
                     for (int l = 0; l < i; l++) {
-                        const int grado = nu[l];
-                        precostanti[l] = std::tgamma(grado/2.0+1.0)/(std::tgamma(grado/2.0)*grado*pigreco);
+                        const double grado = nu[l];
+                        precostanti[l] = std::log(pigreci[l])+std::lgamma(grado/2.0+1.0)-std::log(grado*pigreco)-
+                            (std::log(determinanti[l])+std::lgamma(grado/2.0))/2.0;
                     }
                     for (int l = 0; l < taglia; l++) {
+                        std::vector<double> esponenti(i);
+                        double esponentemassimo = -std::numeric_limits<double>::infinity();
                         const double ascissa = ascisse[l];
                         const double ordinata = ordinate[l];
-                        long double sommatoria = 0.0;
                         for (int m = 0; m < i; m++){
                             const double differenzaascisse = ascissa-muascisse[m];
                             const double differenzaordinate = ordinata-muordinate[m];
-                            const int grado = nu[m];
-                            const long double membro =  precostanti[m]/std::sqrt(determinanti[m])*std::pow(1.0L+
-                                (inverse11[m]*differenzaascisse*differenzaascisse+2.0L*inverse12[m]*
-                                    differenzaascisse*differenzaordinate+inverse22[m]*differenzaordinate*
-                                    differenzaordinate)/grado, -grado/2.0L-1.0L)*pigreci[m];
-                            sommatoria += membro;
-                            verosimiglianzepigreci[l][m] = membro;
+                            const double grado = nu[m];
+                            const double esponente = precostanti[m]-(grado+2.0)/2.0*std::log(1.0+(inverse11[m]*
+                                differenzaascisse*differenzaascisse+2.0*inverse12[m]*differenzaascisse*differenzaordinate+
+                                    inverse22[m]*differenzaordinate*differenzaordinate)/grado);
+                            esponenti[m] = esponente;
+                            if (esponente > esponentemassimo){esponentemassimo = esponente;}
                         }
-                        if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                        logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                        logverosimiglianzepigreci[l] = esponenti;
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                        logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                     }
                     // Se siamo a oltre un quarto delle iterazioni, dopo aver calcolato il valore della
                     // logverosimiglianza vediamo se supera il record attuale.
@@ -2687,14 +2818,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Per prima cosa sfruttiamo le logverosimiglianze calcolate all'iterazione
                     // precedente per trovare i pesi w_{ig}.
                     for (int l = 0; l < taglia; l++) {
-                        std::vector<long double> wi = verosimiglianzepigreci[l];
-                        long double denominatorepesi = 0.0L;
-                        for (int m = 0; m < i; m++) {
-                            denominatorepesi += wi[m];
+                        std::vector<double> wi = logverosimiglianzepigreci[l];
+                        double wimassimo = wi[0];
+                        for (int m = 1; m < i; m++) {
+                            if (wi[m] > wimassimo){wimassimo = wi[m];}
                         }
-                        for (int m = 0; m < i; m++) {
-                            if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                            else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                        if (sommatoria <= 0.0) {
+                            for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                        } else {
+                            for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                         }
                     }
                     // La differenza dell'algoritmo CEM rispetto all'EM è che dopo aver aggiornato
@@ -2702,8 +2836,8 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // al cluster g per cui w_{ig} è massimo; in seguito, quando ciascun parametro
                     // viene aggiornato, nelle formule vengono utilizzati solo i dati che sono stati
                     // assegnati al cluster corrispondente.
-                    std::vector<std::vector<double>> ascissepartizione(i);
-                    std::vector<std::vector<double>> ordinatepartizione(i);
+                    std::vector<std::vector<double>> ascissepartizione(i, std::vector<double>(taglia));
+                    std::vector<std::vector<double>> ordinatepartizione(i, std::vector<double>(taglia));
                     std::vector<int> tagliepartizione(i, 0);
                     for (int l = 0; l < taglia; l++) {
                         double pesomaggiore = pesi[l][0];
@@ -2714,8 +2848,9 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                 clusterunita = m;
                             }
                         }
-                        ascissepartizione[clusterunita].push_back(ascisse[l]);
-                        ordinatepartizione[clusterunita].push_back(ordinate[l]);
+                        const int indice = tagliepartizione[clusterunita];
+                        ascissepartizione[clusterunita][indice] = ascisse[l];
+                        ordinatepartizione[clusterunita][indice] = ordinate[l];
                         tagliepartizione[clusterunita]++;
                     }
                     // Per aggiornare le stime dei parametri, nel caso del CEM, non è necessario
@@ -2724,7 +2859,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Ora aggiorniamo la stima dei parametri.
                     for (int l = 0; l < i; l++) {
                         const int tagliapartizione = tagliepartizione[l];
-                        if (tagliapartizione != 0){
+                        if (tagliapartizione > 1){
                             const std::vector<double> ascissecorrenti = ascissepartizione[l];
                             const std::vector<double> ordinatecorrenti = ordinatepartizione[l];
                             double mediaascissecorrente = 0.0;
@@ -2734,6 +2869,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                 mediaordinatecorrente += ordinatecorrenti[m];
                             }
                             pigreci[l] = static_cast<double>(tagliapartizione)/taglia;
+                            if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                             mediaascissecorrente /= tagliapartizione;
                             mediaordinatecorrente /= tagliapartizione;
                             muascisse[l] = mediaascissecorrente;
@@ -2753,10 +2889,14 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                 varianzaordinate /= tagliapartizione-1;
                                 covarianza /= tagliapartizione-1;
                             }
+                            const double prodottovarianze = std::sqrt(varianzaascisse*varianzaordinate);
+                            if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                                covarianza = std::copysign(prodottovarianze, covarianza);
+                            }
                             double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
                             if (determinante < 0.000001) {
-                                varianzaascisse += 0.00001;
-                                varianzaordinate += 0.00001;
+                                varianzaascisse += 0.001;
+                                varianzaordinate += 0.001;
                                 determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
                             }
                             inverse11[l] = varianzaordinate/determinante;
@@ -2765,28 +2905,45 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                             sigma11[l] = varianzaascisse;
                             sigma22[l] = varianzaordinate;
                             sigma12[l] = covarianza;
-                        } else {pigreci[l] = 0.0;}
+                            determinanti[l] = determinante;
+                        } else {
+                            pigreci[l] = piminimo;
+                            muascisse[l] = inizializzatore(generatore);
+                            muordinate[l] = inizializzatore(generatore);
+                            sigma11[l] = 0.01;
+                            sigma22[l] = 0.01;
+                            sigma12[l] = 0.0;
+                            inverse11[l] = 100.0;
+                            inverse22[l] = 100.0;
+                            inverse12[l] = 0.0;
+                            determinanti[l] = 0.0001;
+                        }
                     }
                     // Adesso calcoliamo il valore attuale della logverosimiglianza.
                     logverosimiglianzeprecedenti = {logverosimiglianzeprecedenti[1], logverosimiglianzacorrente};
                     logverosimiglianzacorrente = 0.0;
+                    std::vector<double> precostanti(i);
+                    for (int l = 0; l < i; l++){
+                        precostanti[l] = std::log(pigreci[l])-logduepigreco-std::log(determinanti[l])/2.0;
+                    }
                     for (int l = 0; l < taglia; l++) {
+                        std::vector<double> esponenti(i);
+                        double esponentemassimo = -std::numeric_limits<double>::infinity();
                         const double ascissa = ascisse[l];
                         const double ordinata = ordinate[l];
-                        long double sommatoria = 0.0L;
                         for (int m = 0; m < i; m++) {
                             const double differenzaascissa = ascissa-muascisse[m];
                             const double differenzaordinata = ordinata-muordinate[m];
-                            const long double esponenziale = -0.5L*inverse11[m]*differenzaascissa*differenzaascissa+
-                                2.0L*inverse12[m]*differenzaascissa*differenzaordinata
-                                +inverse22[m]*differenzaordinata*differenzaordinata;
-                            const long double membro = -1.0L/(2.0L*pigreco*std::sqrt(determinanti[m]))*
-                                std::exp(esponenziale)*pigreci[m];
-                            sommatoria += membro;
-                            verosimiglianzepigreci[l][m] = membro;
+                            const double esponente = precostanti[m]-(inverse11[m]*differenzaascissa*differenzaascissa+
+                                2.0*inverse12[m]*differenzaascissa*differenzaordinata+inverse22[m]*differenzaordinata*
+                                    differenzaordinata)/2.0;
+                            esponenti[m] = esponente;
+                            if (esponente > esponentemassimo){esponentemassimo = esponente;}
                         }
-                        if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                        logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                        logverosimiglianzepigreci[l] = esponenti;
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                        logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                     }
                     // Dalla seconda iterazione in poi, utilizziamo l'accelerazione di Aitken
                     // per controllare la convergenza. Se la regola d'arresto |l_\infty-l_{r-1}|<\epsilon
@@ -2794,8 +2951,9 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     if (k != 0) {
                         const double precedente = logverosimiglianzeprecedenti[1];
                         if (precedente-logverosimiglianzeprecedenti[0] < 0.000001){break;}
-                        const double accelerazione = (logverosimiglianzacorrente - precedente) /
-                            (precedente - logverosimiglianzeprecedenti[0]);
+			            double accelerazione = (logverosimiglianzacorrente - precedente) /
+			                (precedente - logverosimiglianzeprecedenti[0]);
+			            if (accelerazione == 1.0) {accelerazione -= 0.000001;}
                         const double linfinito = precedente + 1.0 / (1.0 - accelerazione) *
                             (logverosimiglianzacorrente - precedente);
                         if (std::abs(linfinito - precedente) < sogliaconvergenza) { break; }
@@ -2807,14 +2965,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Per prima cosa sfruttiamo le logverosimiglianze calcolate all'iterazione
                     // precedente per trovare i pesi w_{ig}.
                     for (int l = 0; l < taglia; l++) {
-                        std::vector<long double> wi = verosimiglianzepigreci[l];
-                        long double denominatorepesi = 0.0L;
-                        for (int m = 0; m < i; m++) {
-                            denominatorepesi += wi[m];
+                        std::vector<double> wi = logverosimiglianzepigreci[l];
+                        double wimassimo = wi[0];
+                        for (int m = 1; m < i; m++) {
+                            if (wi[m] > wimassimo){wimassimo = wi[m];}
                         }
-                        for (int m = 0; m < i; m++) {
-                            if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                            else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                        if (sommatoria <= 0.0){
+                            for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                        } else {
+                            for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-sommatoria);}
                         }
                     }
                     // Adesso calcoliamo anche i pesi u_{ig}, che ricordiamo essere
@@ -2826,9 +2987,9 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         for (int m = 0; m < i; m++) {
                             const double differenzaascisse = ascissa-muascisse[m];
                             const double differenzaordinate = ordinata-muordinate[m];
-                            const double mahalanobis = std::sqrt(inverse11[m]*differenzaascisse*differenzaascisse+
+                            const double mahalanobis = inverse11[m]*differenzaascisse*differenzaascisse+
                                 inverse12[m]*differenzaascisse*differenzaordinate+
-                                inverse22[m]*differenzaordinate*differenzaordinate);
+                                inverse22[m]*differenzaordinate*differenzaordinate;
                             const double gradi = nu[m];
                             uig[l][m] = (gradi+2.0)/(gradi+mahalanobis);
                         }
@@ -2838,9 +2999,9 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // al cluster g per cui w_{ig} è massimo; in seguito, quando ciascun parametro
                     // viene aggiornato, nelle formule vengono utilizzati solo i dati che sono stati
                     // assegnati al cluster corrispondente.
-                    std::vector<std::vector<double>> ascissepartizione(i);
-                    std::vector<std::vector<double>> ordinatepartizione(i);
-                    std::vector<std::vector<double>> upartizione(i);
+                    std::vector<std::vector<double>> ascissepartizione(i, std::vector<double>(taglia));
+                    std::vector<std::vector<double>> ordinatepartizione(i, std::vector<double>(taglia));
+                    std::vector<std::vector<double>> upartizione(i, std::vector<double>(taglia));
                     std::vector<int> tagliepartizione(i, 0);
                     for (int l = 0; l < taglia; l++) {
                         double pesomaggiore = pesi[l][0];
@@ -2851,9 +3012,10 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                 clusterunita = m;
                             }
                         }
-                        ascissepartizione[clusterunita].push_back(ascisse[l]);
-                        ordinatepartizione[clusterunita].push_back(ordinate[l]);
-                        upartizione[clusterunita].push_back(uig[l][clusterunita]);
+                        const int indice = tagliepartizione[clusterunita];
+                        ascissepartizione[clusterunita][indice] = ascisse[l];
+                        ordinatepartizione[clusterunita][indice] = ordinate[l];
+                        upartizione[clusterunita][indice] = uig[l][indice];
                         tagliepartizione[clusterunita]++;
                     }
                     // Ora aggiorniamo la stima dei parametri.
@@ -2873,99 +3035,109 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                 denominatore += u;
                             }
                             pigreci[l] = static_cast<double>(tagliapartizione)/taglia;
-                            if (denominatore >= 0.000001) {
+                            if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
+                            if (denominatore >= 0.000001 && tagliapartizione != 1) {
                                 mediaascissecorrente /= denominatore;
                                 mediaordinatecorrente /= denominatore;
                                 muascisse[l] = mediaascissecorrente;
                                 muordinate[l] = mediaordinatecorrente;
-                            }
-                            double varianzaascisse = 0.0;
-                            double varianzaordinate = 0.0;
-                            double covarianza = 0.0;
-                            for (int m = 0; m < tagliapartizione; m++) {
-                                const double u = ucorrenti[m];
-                                const double differenzaascisse = ascissecorrenti[m]-mediaascissecorrente;
-                                const double differenzaordinate = ordinatecorrenti[m]-mediaordinatecorrente;
-                                varianzaascisse += u*differenzaascisse*differenzaascisse;
-                                varianzaordinate += u*differenzaordinate*differenzaordinate;
-                                covarianza += u*differenzaascisse*differenzaordinate;
-                            }
-                            if (tagliapartizione != 1) {
+                                double varianzaascisse = 0.0;
+                                double varianzaordinate = 0.0;
+                                double covarianza = 0.0;
+                                for (int m = 0; m < tagliapartizione; m++) {
+                                    const double u = ucorrenti[m];
+                                    const double differenzaascisse = ascissecorrenti[m]-mediaascissecorrente;
+                                    const double differenzaordinate = ordinatecorrenti[m]-mediaordinatecorrente;
+                                    varianzaascisse += u*differenzaascisse*differenzaascisse;
+                                    varianzaordinate += u*differenzaordinate*differenzaordinate;
+                                    covarianza += u*differenzaascisse*differenzaordinate;
+                                }
                                 varianzaascisse /= tagliapartizione;
                                 varianzaordinate /= tagliapartizione;
                                 covarianza /= tagliapartizione;
+                                const double prodottovarianze = std::sqrt(varianzaascisse*varianzaordinate);
+                                if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                                    covarianza = std::copysign(prodottovarianze, covarianza);
+                                }
+                                double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
+                                if (determinante < 0.000001) {
+                                    varianzaascisse += 0.001;
+                                    varianzaordinate += 0.001;
+                                    determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
+                                }
+                                inverse11[l] = varianzaordinate/determinante;
+                                inverse22[l] = varianzaascisse/determinante;
+                                inverse12[l] = -covarianza/determinante;
+                                sigma11[l] = varianzaascisse;
+                                sigma22[l] = varianzaordinate;
+                                sigma12[l] = covarianza;
+                                determinanti[l] = determinante;
+                            } else {
+                                muascisse[l] = inizializzatore(generatore);
+                                muordinate[l] = inizializzatore(generatore);
+                                sigma11[l] = 0.01;
+                                sigma22[l] = 0.01;
+                                sigma12[l] = 0.0;
+                                inverse11[l] = 100.0;
+                                inverse22[l] = 100.0;
+                                inverse12[l] = 0.0;
+                                determinanti[l] = 0.0001;
                             }
-                            double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
-                            if (determinante < 0.000001) {
-                                varianzaascisse += 0.00001;
-                                varianzaordinate += 0.00001;
-                                determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
+                            double grado = nu[l];
+                            if (grado <= 0.0){grado = 0.001;}
+                            const double gradoiniziale = grado;
+                            double grado1 = gradoiniziale/2.0+1.0;
+                            double digamma1 = 0.0;
+                            while (grado1 < 6.0) {
+                                digamma1 -= 1.0/grado1;
+                                grado1++;
                             }
-                            inverse11[l] = varianzaordinate/determinante;
-                            inverse22[l] = varianzaascisse/determinante;
-                            inverse12[l] = -covarianza/determinante;
-                            sigma11[l] = varianzaascisse;
-                            sigma22[l] = varianzaordinate;
-                            sigma12[l] = covarianza;
-                            int grado = nu[l];
-                            if (grado < 1){grado = 1;}
-                            double grado2 = grado/2.0;
-                            double grado21 = grado2+1.0;
-                            const double loggrado2 = std::log(grado2);
-                            const double loggrado21 = std::log(grado21);
-                            const double unosugrado2 = 1.0/(grado+2.0);
+                            const double g2 = grado1*grado1;
+                            const double g4 = g2*g2;
+                            const double g8 = g4*g4;
+                            digamma1 += std::log(grado1)-1.0/(2.0*grado1)-1.0/(12.0*g2)+1.0/(120.0*g4)-1.0/(252.0*g4*g2)+
+                                1.0/(240.0*g8)-1.0/(132.0*g8*g2);
                             double sommaru = 0.0;
-                            for (int m = 0; m < tagliapartizione; m++) {
+                            for (int m = 0; m < tagliapartizione; m++){
                                 double u = ucorrenti[m];
                                 if (u < 0.000001){u += 0.000001;}
                                 sommaru += std::log(u)-u;
                             }
-                            // Usiamo questo algoritmo per calcolare \psi((\nu+2)/2).
-                            double digamma21 = 0.0;
-                            while (grado21 < 6.0) {
-                                digamma21 -= 1.0 / grado21;
-                                grado21++;
+                            const double costantenumeratore = digamma1+1.0+sommaru/tagliapartizione;
+                            for (int m = 0; m < 20; m++) {
+                                double grado2 = grado/2.0;
+                                double digamma2 = 0.0;
+                                double trigamma = 0.0;
+                                while (grado2 < 6.0) {
+                                    digamma2 -= 1.0/grado2;
+                                    trigamma += 1.0/(grado2*grado2);
+                                    grado2++;
+                                }
+                                const double gg2 = grado2*grado2;
+                                const double gg4 = gg2*gg2;
+                                const double gg8 = gg4*gg4;
+                                digamma2 += std::log(grado2)-1.0/(2.0*grado2)-1.0/(12.0*gg2)+1.0/(120.0*gg4)-
+                                    1.0/(252.0*gg4*gg2)+1.0/(240.0*gg8)-1.0/(132.0*gg8*gg2);
+                                trigamma += 1.0/grado2+1.0/(2.0*gg2)+1.0/(6.0*gg2*grado2)-1.0/(30.0*gg4*grado2)+
+                                    1.0/(42.0*gg4*gg2*grado2)-1.0/(30.0*gg8*grado2)+10.0/(132.0*gg8*gg2*grado2);
+                                const double logaritmo = std::log(grado/(gradoiniziale+2.0));
+                                const double reciproco = 1.0/grado;
+                                grado -= (costantenumeratore-digamma2+logaritmo)/(reciproco-0.5*trigamma);
+                                if (grado <= 0.0){grado = 0.001;}
+                                if (grado > 200.0){grado = 200.0;}
                             }
-                            const double xx = 1.0 / grado21;
-                            const double xx2 = xx*xx;
-                            const double xx4 = xx2*xx2;
-                            digamma21 += std::log(grado21)-xx/2.0-xx2/12.0+xx4/120.0-xx4*xx2/252.0;
-                            // Similmente calcoliamo \psi(\nu/2).
-                            double digamma2 = 0.0;
-                            while (grado2 < 6.0) {
-                                digamma2 -= 1.0 / grado2;
-                                grado2++;
-                            }
-                            const double xxx = 1.0 / grado2;
-                            const double xxx2 = xxx*xxx;
-                            const double xxx4 = xxx2*xxx2;
-                            digamma2 += std::log(grado2)-xxx/2.0-xxx2/12.0+xxx4/120.0-xxx4*xxx2/252.0;
-                            const double numeratore = -digamma2+loggrado2+1.0+sommaru/grado+digamma21-loggrado21;
-                            grado2 = grado/2.0;
-                            // Con quest'altro algoritmo approssimiamo la funzione trigamma, ossia \psi'(\nu/2).
-                            double trigamma2 = 0.0;
-                            while (grado2 < 6.0) {
-                                trigamma2 += 1.0 / (grado2 * grado2);
-                                grado2++;
-                            }
-                            const double xxxx = 1.0 / grado2;
-                            const double xxxx2 = xxxx * xxxx;
-                            trigamma2 += xxxx / 2.0 + xxxx2 / 6.0 - xxxx2 * xxxx2 / 30.0 + xxxx2 * xxxx2 * xxxx2 / 42.0;
-                            // E infine approssimiamo \psi'((\nu+2)/2).
-                            grado21 = grado/2.0+1.0;
-                            double trigamma21 = 0.0;
-                            while (grado21 < 6.0) {
-                                trigamma21 += 1.0/(grado21*grado21);
-                                grado21++;
-                            }
-                            const double xxxxx = 1.0/grado21;
-                            const double xxxxx2 = xxxxx*xxxxx;
-                            trigamma21 += xxxxx/2.0+xxxxx2/6.0-xxxxx2*xxxxx2/30.0+xxxxx2*xxxxx2*xxxxx2/42.0;
-                            const double denominatore2 = -trigamma2/2.0+1.0/grado-sommaru/(grado*grado)+
-                                trigamma21/2.0-unosugrado2;
-                            if (grado-numeratore/denominatore2){nu[l] = 1;}
-                            else {nu[l] = static_cast<int>(std::round(grado-numeratore/denominatore2));}
-                        } else {pigreci[l] = 0.0;}
+                            nu[l] = grado;
+                        } else {
+                            pigreci[l] = piminimo;
+                            muascisse[l] = inizializzatore(generatore);
+                            muordinate[l] = inizializzatore(generatore);
+                            sigma11[l] = 0.01;
+                            sigma22[l] = 0.01;
+                            sigma12[l] = 0.0;
+                            inverse11[l] = 100.0;
+                            inverse22[l] = 100.0;
+                            inverse12[l] = 0.0;
+                        }
                     }
                     // Ora calcoliamo la logverosimiglianza.
                     logverosimiglianzeprecedenti = {logverosimiglianzeprecedenti[1], logverosimiglianzacorrente};
@@ -2973,33 +3145,37 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Iniziamo calcolando le costanti \Gamma((\nu+2)/2)/(\Gamma(\nu/2)\nu\pi).
                     std::vector<double> precostanti(i);
                     for (int l = 0; l < i; l++) {
-                        const int grado = nu[l];
-                        precostanti[l] = std::tgamma(grado/2.0+1.0)/(std::tgamma(grado/2.0)*grado*pigreco);
+                        const double grado = nu[l];
+                        precostanti[l] = std::log(pigreci[l])+std::lgamma(grado/2.0+1.0)-std::log(grado*pigreco)-
+                            std::log(determinanti[l])/2.0-std::lgamma(grado/2.0);
                     }
                     for (int l = 0; l < taglia; l++) {
+                        std::vector<double> esponenti(i);
+                        double esponentemassimo = -std::numeric_limits<double>::infinity();
                         const double ascissa = ascisse[l];
                         const double ordinata = ordinate[l];
-                        long double sommatoria = 0.0L;
                         for (int m = 0; m < i; m++){
                             const double differenzaascisse = ascissa-muascisse[m];
                             const double differenzaordinate = ordinata-muordinate[m];
-                            const int grado = nu[m];
-                            const long double membro =  precostanti[m]/std::sqrt(determinanti[m])*std::pow(1.0L+
-                                (inverse11[m]*differenzaascisse*differenzaascisse+2.0L*inverse12[m]*
-                                    differenzaascisse*differenzaordinate+inverse22[m]*differenzaordinate*
-                                    differenzaordinate)/grado, -grado/2.0L-1.0L)*pigreci[m];
-                            sommatoria += membro;
-                            verosimiglianzepigreci[l][m] = membro;
-                        }
-                        if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                        logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                            const double grado = nu[m];
+                            const double esponente = precostanti[m]-(grado+2.0)/2.0*std::log(1.0+(inverse11[m]*
+                                differenzaascisse*differenzaascisse+2.0*inverse12[m]*differenzaascisse*differenzaordinate+
+                                    inverse22[m]*differenzaordinate*differenzaordinate)/grado);
+                            esponenti[m] = esponente;
+                            if (esponente > esponentemassimo){esponentemassimo = esponente;}
+                      }
+                        logverosimiglianzepigreci[l] = esponenti;
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                        logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                     }
                     // Dalla seconda iterazione in poi controlliamo la convergenza con l'accelerazione di Aitken.
                     if (k != 0) {
                         const double precedente = logverosimiglianzeprecedenti[1];
                         if (precedente-logverosimiglianzeprecedenti[0] < 0.000001){break;}
-                        const double accelerazione = (logverosimiglianzacorrente - precedente)/
-                            (precedente - logverosimiglianzeprecedenti[0]);
+			            double accelerazione = (logverosimiglianzacorrente - precedente) /
+			                (precedente - logverosimiglianzeprecedenti[0]);
+			            if (accelerazione == 1.0) {accelerazione -= 0.000001;}
                         const double linfinito = precedente + 1.0 / (1.0 - accelerazione) *
                             (logverosimiglianzacorrente - precedente);
                         if (std::abs(linfinito - precedente) < sogliaconvergenza) { break; }
@@ -3194,7 +3370,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
         std::vector<double> sigma12(i, 0.0);
         // Inizializziamo in ogni caso i gradi di libertà; nel caso abbiamo scelto di usare misture
         // di gaussiane, semplicemente non saranno usati.
-        std::vector<int> nu(i, 5);
+        std::vector<double> nu(i, 5.0);
         for (int k = 0; k < taglia; k++) {
             const int suocluster = clustercorrenti[k];
             muascisse[suocluster] += ascisse[k];
@@ -3207,6 +3383,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                 muordinate[k] /= tagliadelcluster;
             }
             pigreci[k] = static_cast<double>(tagliadelcluster)/taglia;
+            if (pigreci[k] < piminimo){pigreci[k] = piminimo;}
         }
         for (int k = 0; k < taglia; k++) {
             const int suocluster = clustercorrenti[k];
@@ -3232,12 +3409,16 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
         std::vector<double> inverse22(i);
         std::vector<double> inverse12(i);
         for (int k = 0; k < i; k++) {
-            const double covarianzacluster = sigma12[k];
+            const double prodottovarianze = std::sqrt(sigma11[k]*sigma22[k]);
+            double covarianzacluster = sigma12[k];
+            if (covarianzacluster < -prodottovarianze || covarianzacluster > prodottovarianze){
+                covarianzacluster = std::copysign(prodottovarianze, covarianzacluster);
+            }
             double determinante = sigma11[k]*sigma22[k]-covarianzacluster*covarianzacluster;
             if (determinante < 0.000001) {
-                determinante = 0.00001*sigma11[k]+0.00001*sigma22[k]+0.0000000001;
-                sigma11[k] += 0.00001;
-                sigma22[k] += 0.00001;
+                sigma11[k] += 0.001;
+                sigma22[k] += 0.001;
+                determinante = sigma11[k]*sigma22[k]-covarianzacluster*covarianzacluster;
             }
             determinanti[k] = determinante;
             inverse11[k] = sigma22[k]/determinante;
@@ -3247,44 +3428,56 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
         // Calcoliamo il valore della logverosimiglianza (delle gaussiane o delle t di Student)
         // con la partizione attuale. Inoltre, salviamo i valori individuali delle verosimiglianze
         // per gli specifici i e g in modo da riusarli dopo.
-        std::vector<std::vector<long double>> verosimiglianzepigreci(taglia, std::vector<long double>(i, 0.0));
+        std::vector<std::vector<double>> logverosimiglianzepigreci(taglia, std::vector<double>(i, 0.0));
         double logverosimiglianzacorrente = 0.0;
         if (normale) {
+            std::vector<double> precostanti(i);
+            for (int k = 0; k < i; k++) {
+                precostanti[k] = std::log(pigreci[k])-logduepigreco-std::log(determinanti[k])/2.0;
+            }
             for (int k = 0; k < taglia; k++) {
+                std::vector<double> esponenti(i);
+                double esponentemassimo = -std::numeric_limits<double>::infinity();
                 const double ascissa = ascisse[k];
                 const double ordinata = ordinate[k];
-                long double sommatoria = 0.0L;
                 for (int l = 0; l < i; l++) {
                     const double differenzaascissa = ascissa-muascisse[l];
                     const double differenzaordinata = ordinata-muordinate[l];
-                    const long double esponenziale = -0.5L*inverse11[l]*differenzaascissa*differenzaascissa+
-                        2.0L*inverse12[l]*differenzaascissa*differenzaordinata
-                        +inverse22[l]*differenzaordinata*differenzaordinata;
-                    const long double membro = -1.0L/(2.0L*pigreco*std::sqrt(determinanti[l]))*
-                        std::exp(esponenziale)*pigreci[l];
-                    sommatoria += membro;
-                    verosimiglianzepigreci[k][l] = membro;
+                    const double esponente = precostanti[l]-(inverse11[l]*differenzaascissa*differenzaascissa+
+                        2.0*inverse12[l]*differenzaascissa*differenzaordinata+inverse22[l]*differenzaordinata*
+                            differenzaordinata)/2.0;
+                    esponenti[l] = esponente;
+                    if (esponente > esponentemassimo){esponentemassimo = esponente;}
                 }
-                if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                logverosimiglianzepigreci[k] = esponenti;
+                double sommatoria = 0.0;
+                for (int l = 0; l < i; l++){sommatoria += std::exp(esponenti[l]-esponentemassimo);}
+                logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
             }
         } else {
-            const double precostante = std::tgamma(3.5)/(std::tgamma(2.5)*pigreco*5.0);
+            std::vector<double> precostanti(i);
+            for (int k = 0; k < i; k++) {
+                precostanti[k] = std::log(pigreci[k])+std::lgamma(3.5)-std::log(5.0*pigreco)-
+                    std::log(determinanti[k])/2.0-std::lgamma(2.5);
+            }
             for (int k = 0; k < taglia; k++) {
+                std::vector<double> esponenti(i);
+                double esponentemassimo = -std::numeric_limits<double>::infinity();
                 const double ascissa = ascisse[k];
-                const double ordinata = ascisse[k];
-                long double sommatoria = 0.0L;
+                const double ordinata = ordinate[k];
                 for (int l = 0; l < i; l++) {
                     const double differenzaascissa = ascissa-muascisse[l];
                     const double differenzaordinata = ordinata-muordinate[l];
-                    const long double membro = precostante/std::sqrt(determinanti[l])*std::pow(1.0L+0.2L*
-                        (inverse11[l]*differenzaascissa*differenzaascissa+2.0L*inverse12[l]*differenzaascissa*
-                        differenzaordinata+inverse22[l]*differenzaordinata*differenzaordinata), -3.5L)*pigreci[l];
-                    sommatoria += membro;
-                    verosimiglianzepigreci[k][l] = membro;
+                    const double esponente = precostanti[l]-3.5*std::log(1.0+(inverse11[l]*differenzaascissa*
+                        differenzaascissa+2.0*inverse12[l]*differenzaascissa*differenzaordinata+inverse22[l]*
+                            differenzaordinata*differenzaordinata)/5.0);
+                    esponenti[l] = esponente;
+                    if (esponente > esponentemassimo){esponentemassimo = esponente;}
                 }
-                if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                logverosimiglianzepigreci[k] = esponenti;
+                double sommatoria = 0.0;
+                for (int l = 0; l < i; l++){sommatoria += std::exp(esponenti[l]-esponentemassimo);}
+                logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
             }
         }
         // Inizializziamo il vettore di pesi w_{ig} e poi avviamo l'algoritmo iterativo di stima dei parametri.
@@ -3300,16 +3493,18 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Iniziamo calcolando i pesi w_{ig}.
                     for (int l = 0; l < taglia; l++) {
                         // Ricordiamo che w_{ig}=\pi_gf_g/\sum_g\pi_gf_g. Abbiamo già immagazzinato
-                        // le quantità \pi_gf_g in verosimiglianzepigreci,
-                        // e "denominatorepesi" sarà la loro somma per i fissato.
-                        std::vector<long double> wi = verosimiglianzepigreci[l];
-                        double denominatorepesi = 0.0;
-                        for (int m = 0; m < i; m++) {
-                            denominatorepesi += wi[m];
+                        // le quantità \pi_gf_g in logverosimiglianzepigreci.
+                        std::vector<double> wi = logverosimiglianzepigreci[l];
+                        double wimassimo = wi[0];
+                        for (int m = 1; m < i; m++) {
+                            if (wi[m] > wimassimo){wimassimo = wi[m];}
                         }
-                        for (int m = 0; m < i; m++) {
-                            if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                            else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                        if (sommatoria <= 0.0) {
+                            for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                        } else {
+                            for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                         }
                     }
                     // Per aggiornare le stime dei parametri, ci serve conoscere \sum_iw_{ig}.
@@ -3336,8 +3531,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double sommawi = sommewi[l];
-                        if (sommawi < 0.000001){sommawi += 0.000001;}
+                        if (sommawi < 0.000001){
+                            pigreci[l] = piminimo;
+                            muascisse[l] = inizializzatore(generatore);
+                            muordinate[l] = inizializzatore(generatore);
+                            sigma11[l] = 0.0;
+                            sigma22[l] = 0.0;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         pigreci[l] = sommawi/taglia;
+                        if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                         muascisse[l] /= sommawi;
                         muordinate[l] /= sommawi;
                         // Riazzeriamo nello stesso ciclo le stime delle matrici di covarianze.
@@ -3361,7 +3565,12 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double sommawi = sommewi[l];
-                        if (sommawi < 0.000001){sommawi += 0.000001;}
+                        if (sommawi < 0.000001){
+                            sigma11[l] = 0.01;
+                            sigma22[l] = 0.01;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         sigma11[l] /= sommawi;
                         sigma22[l] /= sommawi;
                         sigma12[l] /= sommawi;
@@ -3369,11 +3578,16 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Delle matrici di covarianze calcoliamo anche le inverse.
                     // Usiamo come sempre la regolarizzazione di Tikhonov.
                     for (int l = 0; l < i; l++) {
-                        const double covarianza = sigma12[l];
+                        const double prodottovarianze = std::sqrt(sigma11[l]*sigma22[l]);
+                        double covarianza = sigma12[l];
+                        if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                            covarianza = std::copysign(prodottovarianze, covarianza);
+                            sigma12[l] = covarianza;
+                        }
                         double determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         if (determinante < 0.000001) {
-                            sigma11[l] += 0.00001;
-                            sigma22[l] += 0.00001;
+                            sigma11[l] += 0.001;
+                            sigma22[l] += 0.001;
                             determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         }
                         determinanti[l] = determinante;
@@ -3384,23 +3598,28 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Adesso calcoliamo il valore attuale della logverosimiglianza.
                     logverosimiglianzeprecedenti = {logverosimiglianzeprecedenti[1], logverosimiglianzacorrente};
                     logverosimiglianzacorrente = 0.0;
+                    std::vector<double> precostanti(i);
+                    for (int l = 0; l < i; l++) {
+                        precostanti[l] = std::log(pigreci[l])-logduepigreco-std::log(determinanti[l])/2.0;
+                    }
                     for (int l = 0; l < taglia; l++) {
+                        std::vector<double> esponenti(i);
+                        double esponentemassimo = -std::numeric_limits<double>::infinity();
                         const double ascissa = ascisse[l];
                         const double ordinata = ordinate[l];
-                        long double sommatoria = 0.0L;
                         for (int m = 0; m < i; m++) {
                             const double differenzaascissa = ascissa-muascisse[m];
                             const double differenzaordinata = ordinata-muordinate[m];
-                            const long double esponenziale = -0.5L*inverse11[m]*differenzaascissa*differenzaascissa+
-                                2.0L*inverse12[m]*differenzaascissa*differenzaordinata
-                                +inverse22[m]*differenzaordinata*differenzaordinata;
-                            const long double membro = -1.0L/(2.0L*pigreco*std::sqrt(determinanti[m]))*
-                                std::exp(esponenziale)*pigreci[m];
-                            sommatoria += membro;
-                            verosimiglianzepigreci[l][m] = membro;
+                            const double esponente = precostanti[m]-(inverse11[m]*differenzaascissa*differenzaascissa+
+                                2.0*inverse12[m]*differenzaascissa*differenzaordinata+inverse22[m]*differenzaordinata*
+                                    differenzaordinata)/2.0;
+                            esponenti[m] = esponente;
+                            if (esponente > esponentemassimo){esponentemassimo = esponente;}
                         }
-                        if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                        logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                        logverosimiglianzepigreci[l] = esponenti;
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                        logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                     }
                     // Dalla seconda iterazione in poi, utilizziamo l'accelerazione di Aitken
                     // per controllare la convergenza. Se la regola d'arresto |l_\infty-l_{r-1}|<\epsilon
@@ -3408,8 +3627,9 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     if (k != 0) {
                         const double precedente = logverosimiglianzeprecedenti[1];
                         if (precedente-logverosimiglianzeprecedenti[0] < 0.000001){break;}
-                        const double accelerazione = (logverosimiglianzacorrente - precedente) /
-                            (precedente - logverosimiglianzeprecedenti[0]);
+			            double accelerazione = (logverosimiglianzacorrente - precedente) /
+			                (precedente - logverosimiglianzeprecedenti[0]);
+			            if (accelerazione == 1.0) {accelerazione -= 0.000001;}
                         const double linfinito = precedente + 1.0 / (1.0 - accelerazione) *
                             (logverosimiglianzacorrente - precedente);
                         if (std::abs(linfinito - precedente) < sogliaconvergenza) { break; }
@@ -3422,14 +3642,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Per prima cosa sfruttiamo le logverosimiglianze calcolate all'iterazione
                     // precedente per trovare i pesi w_{ig}.
                     for (int l = 0; l < taglia; l++) {
-                        std::vector<long double> wi = verosimiglianzepigreci[l];
-                        long double denominatorepesi = 0.0L;
-                        for (int m = 0; m < i; m++) {
-                            denominatorepesi += wi[m];
+                        std::vector<double> wi = logverosimiglianzepigreci[l];
+                        double wimassimo = wi[0];
+                        for (int m = 1; m < i; m++) {
+                            if (wi[m] > wimassimo){wimassimo = wi[m];}
                         }
-                        for (int m = 0; m < i; m++) {
-                            if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                            else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                        if (sommatoria <= 0.0){
+                            for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                        } else {
+                            for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                         }
                     }
                     // Prima di continuare, prepariamoci calcolando le somme dei w_{ig} per ogni g.
@@ -3460,6 +3683,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         muascisse[l] = 0.0;
                         muordinate[l] = 0.0;
                         pigreci[l] = sommewi[l]/taglia;
+                        if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                     }
                     std::vector<double> denominatori(i, 0.0);
                     for (int l = 0; l < taglia; l++) {
@@ -3476,7 +3700,14 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double denominatore = denominatori[l];
-                        if (denominatore < 0.000001){denominatore += 0.000001;}
+                        if (denominatore < 0.000001) {
+                            muascisse[l] = inizializzatore(generatore);
+                            muordinate[l] = inizializzatore(generatore);
+                            sigma11[l] = 0.0;
+                            sigma22[l] = 0.0;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         muascisse[l] /= denominatore;
                         muordinate[l] /= denominatore;
                         // Riazzeriamo nello stesso ciclo le stime delle matrici di covarianze.
@@ -3500,18 +3731,28 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double sommawi = sommewi[l];
-                        if (sommawi < 0.000001){sommawi += 0.000001;}
+                        if (sommawi < 0.000001) {
+                            sigma11[l] = 0.01;
+                            sigma22[l] = 0.01;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         sigma11[l] /= sommawi;
                         sigma22[l] /= sommawi;
                         sigma12[l] /= sommawi;
                     }
                     // Inoltre calcoliamo le inverse e i determinanti di tali matrici.
                     for (int l = 0; l < i; l++) {
-                        const double covarianza = sigma12[l];
+                        const double prodottovarianze = std::sqrt(sigma11[l]*sigma22[l]);
+                        double covarianza = sigma12[l];
+                        if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                            covarianza = std::copysign(prodottovarianze, covarianza);
+                            sigma12[l] = covarianza;
+                        }
                         double determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         if (determinante < 0.000001) {
-                            sigma11[l] += 0.00001;
-                            sigma22[l] += 0.00001;
+                            sigma11[l] += 0.001;
+                            sigma22[l] += 0.001;
                             determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         }
                         determinanti[l] = determinante;
@@ -3536,60 +3777,45 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                             sommeru[m] += rigapesi[m]*(std::log(u)-u);
                         }
                     }
-                    for (int l = 0; l < i; l++) {
-                        int grado = nu[l];
-                        if (grado < 1){grado = 1;}
-                        double grado2 = grado/2.0;
-                        double grado21 = grado2+1.0;
-                        const double loggrado2 = std::log(grado2);
-                        const double loggrado21 = std::log(grado21);
-                        const double unosugrado2 = 1.0/(grado+2.0);
-                        const double sommaru = sommeru[l];
-                        // Usiamo questo algoritmo per calcolare \psi((\nu+2)/2).
-                        double digamma21 = 0.0;
-                        while (grado21 < 6.0) {
-                            digamma21 -= 1.0 / grado21;
-                            grado21++;
+                    for (int l = 0; l < i; l++){
+                        double grado = nu[l];
+                        if (grado <= 0.0){grado = 0.001;}
+                        const double gradoiniziale = grado;
+                        double grado1 = gradoiniziale/2.0+1.0;
+                        double digamma1 = 0.0;
+                        while (grado1 < 6.0) {
+                            digamma1 -= 1.0/grado1;
+                            grado1++;
                         }
-                        const double xx = 1.0 / grado21;
-                        const double xx2 = xx*xx;
-                        const double xx4 = xx2*xx2;
-                        digamma21 += std::log(grado21)-xx/2.0-xx2/12.0+xx4/120.0-xx4*xx2/252.0;
-                        // Similmente calcoliamo \psi(\nu/2).
-                        double digamma2 = 0.0;
-                        while (grado2 < 6.0) {
-                            digamma2 -= 1 / grado2;
-                            grado2++;
+                        const double g2 = grado1*grado1;
+                        const double g4 = g2*g2;
+                        const double g8 = g4*g4;
+                        digamma1 += std::log(grado1)-1.0/(2.0*grado1)-1.0/(12.0*g2)+1.0/(120.0*g4)-1.0/(252.0*g4*g2)+
+                            1.0/(240.0*g8)-1.0/(132.0*g8*g2);
+                        const double costantenumeratore = digamma1+1.0+sommeru[l]/sommewi[l];
+                        for (int m = 0; m < 20; m++) {
+                            double grado2 = grado/2.0;
+                            double digamma2 = 0.0;
+                            double trigamma = 0.0;
+                            while (grado2 < 6.0) {
+                                digamma2 -= 1.0/grado2;
+                                trigamma += 1.0/(grado2*grado2);
+                                grado2++;
+                            }
+                            const double gg2 = grado2*grado2;
+                            const double gg4 = gg2*gg2;
+                            const double gg8 = gg4*gg4;
+                            digamma2 += std::log(grado2)-1.0/(2.0*grado2)-1.0/(12.0*gg2)+1.0/(120.0*gg4)-
+                                1.0/(252.0*gg4*gg2)+1.0/(240.0*gg8)-1.0/(132.0*gg8*gg2);
+                            trigamma += 1.0/grado2+1.0/(2.0*gg2)+1.0/(6.0*gg2*grado2)-1.0/(30.0*gg4*grado2)+
+                                1.0/(42.0*gg4*gg2*grado2)-1.0/(30.0*gg8*grado2)+10.0/(132.0*gg8*gg2*grado2);
+                            const double logaritmo = std::log(grado/(gradoiniziale+2.0));
+                            const double reciproco = 1.0/grado;
+                            grado -= (costantenumeratore-digamma2+logaritmo)/(reciproco-0.5*trigamma);
+                            if (grado <= 0.0){grado = 0.001;}
+                            if (grado > 200.0){grado = 200.0;}
                         }
-                        const double xxx = 1.0 / grado2;
-                        const double xxx2 = xxx*xxx;
-                        const double xxx4 = xxx2*xxx2;
-                        digamma2 += std::log(grado2)-xxx/2.0-xxx2/12.0+xxx4/120.0-xxx4*xxx2/252.0;
-                        const double numeratore = -digamma2+loggrado2+1.0+sommaru/grado+digamma21-loggrado21;
-                        grado2 = grado/2.0;
-                        // Con quest'altro algoritmo approssimiamo la funzione trigamma, ossia \psi'(\nu/2).
-                        double trigamma2 = 0.0;
-                        while (grado2 < 6.0) {
-                            trigamma2 += 1.0 / (grado2 * grado2);
-                            grado2++;
-                        }
-                        const double xxxx = 1.0 / grado2;
-                        const double xxxx2 = xxxx * xxxx;
-                        trigamma2 += xxxx / 2.0 + xxxx2 / 6.0 - xxxx2 * xxxx2 / 30.0 + xxxx2 * xxxx2 * xxxx2 / 42.0;
-                        // E infine approssimiamo \psi'((\nu+2)/2).
-                        grado21 = grado/2.0+1.0;
-                        double trigamma21 = 0.0;
-                        while (grado21 < 6.0) {
-                            trigamma21 += 1.0/(grado21*grado21);
-                            grado21++;
-                        }
-                        const double xxxxx = 1.0/grado21;
-                        const double xxxxx2 = xxxxx*xxxxx;
-                        trigamma21 += xxxxx/2.0+xxxxx2/6.0-xxxxx2*xxxxx2/30.0+xxxxx2*xxxxx2*xxxxx2/42.0;
-                        const double denominatore = -trigamma2/2.0+1.0/grado-sommaru/(grado*grado)+
-                            trigamma21/2.0-unosugrado2;
-                        if (grado-numeratore/denominatore < 1.0){nu[l] = 1;}
-                        else {nu[l] = static_cast<int>(std::round(grado-numeratore/denominatore));}
+                        nu[l] = grado;
                     }
                     // Ora calcoliamo la logverosimiglianza.
                     logverosimiglianzeprecedenti = {logverosimiglianzeprecedenti[1], logverosimiglianzacorrente};
@@ -3597,33 +3823,37 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Iniziamo calcolando le costanti \Gamma((\nu+2)/2)/(\Gamma(\nu/2)\nu\pi).
                     std::vector<double> precostanti(i);
                     for (int l = 0; l < i; l++) {
-                        const int grado = nu[l];
-                        precostanti[l] = std::tgamma(grado/2.0+1.0)/(std::tgamma(grado/2.0)*grado*pigreco);
+                        const double grado = nu[l];
+                        precostanti[l] = std::log(pigreci[l])+std::lgamma(grado/2.0+1.0)-std::log(grado*pigreco)-
+                            std::log(determinanti[l])/2.0-std::lgamma(grado/2.0);
                     }
                     for (int l = 0; l < taglia; l++) {
+                        std::vector<double> esponenti(i);
+                        double esponentemassimo = -std::numeric_limits<double>::infinity();
                         const double ascissa = ascisse[l];
                         const double ordinata = ordinate[l];
-                        long double sommatoria = 0.0;
                         for (int m = 0; m < i; m++){
                             const double differenzaascisse = ascissa-muascisse[m];
                             const double differenzaordinate = ordinata-muordinate[m];
-                            const int grado = nu[m];
-                            const long double membro =  precostanti[m]/std::sqrt(determinanti[m])*std::pow(1.0L+
-                                (inverse11[m]*differenzaascisse*differenzaascisse+2.0L*inverse12[m]*
-                                    differenzaascisse*differenzaordinate+inverse22[m]*differenzaordinate*
-                                    differenzaordinate)/grado, -grado/2.0L-1.0L)*pigreci[m];
-                            sommatoria += membro;
-                            verosimiglianzepigreci[l][m] = membro;
+                            const double grado = nu[m];
+                            const double esponente = precostanti[m]-(grado+2.0)/2.0*std::log(1.0+(inverse11[m]*
+                                differenzaascisse*differenzaascisse+2.0*inverse12[m]*differenzaascisse*differenzaordinate+
+                                    inverse22[m]*differenzaordinate*differenzaordinate)/grado);
+                            esponenti[m] = esponente;
+                            if (esponente > esponentemassimo){esponentemassimo = esponente;}
                         }
-                        if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                        logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                        logverosimiglianzepigreci[l] = esponenti;
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                        logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                     }
                     // Dalla seconda iterazione in poi controlliamo la convergenza con l'accelerazione di Aitken.
                     if (k != 0) {
                         const double precedente = logverosimiglianzeprecedenti[1];
-                        if (precedente-logverosimiglianzeprecedenti[0]){break;}
-                        const double accelerazione = (logverosimiglianzacorrente - precedente)/
-                            (precedente - logverosimiglianzeprecedenti[0]);
+                        if (precedente-logverosimiglianzeprecedenti[0] < 0.000001){break;}
+			            double accelerazione = (logverosimiglianzacorrente - precedente) /
+			                (precedente - logverosimiglianzeprecedenti[0]);
+			            if (accelerazione == 1.0) {accelerazione -= 0.000001;}
                         const double linfinito = precedente + 1.0 / (1.0 - accelerazione) *
                             (logverosimiglianzacorrente - precedente);
                         if (std::abs(linfinito - precedente) < sogliaconvergenza) { break; }
@@ -3672,7 +3902,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
             std::vector<double> sigma11vincenti = sigma11;
             std::vector<double> sigma22vincenti = sigma22;
             std::vector<double> sigma12vincenti = sigma12;
-            std::vector<int> nuvincenti = nu;
+            std::vector<double> nuvincenti = nu;
             std::vector<std::vector<double>> pesivincenti(taglia, pigreci);
             // Se usiamo misture di gaussiane:
             if (normale) {
@@ -3683,14 +3913,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         // Ricordiamo che w_{ig}=\pi_gf_g/\sum_g\pi_gf_g. Abbiamo già immagazzinato
                         // le quantità \pi_gf_g in verosimiglianzepigreci,
                         // e "denominatorepesi" sarà la loro somma per i fissato.
-                        std::vector<long double> wi = verosimiglianzepigreci[l];
-                        long double denominatorepesi = 0.0L;
-                        for (int m = 0; m < i; m++) {
-                            denominatorepesi += wi[m];
+                        std::vector<double> wi = logverosimiglianzepigreci[l];
+                        double wimassimo = wi[0];
+                        for (int m = 1; m < i; m++) {
+                            if (wi[m] > wimassimo){wimassimo = wi[m];}
                         }
-                        for (int m = 0; m < i; m++) {
-                            if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                            else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                        if (sommatoria <= 0.0) {
+                            for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                        } else {
+                            for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                         }
                     }
                     // L'algoritmo SEM differisce dall'EM perché una volta calcolati i pesi w_{ig},
@@ -3728,8 +3961,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double sommawi = sommewi[l];
-                        if (sommawi < 0.000001){sommawi += 0.000001;}
+                        if (sommawi < 0.000001){
+                            pigreci[l] = piminimo;
+                            muascisse[l] = inizializzatore(generatore);
+                            muordinate[l] = inizializzatore(generatore);
+                            sigma11[l] = 0.0;
+                            sigma22[l] = 0.0;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         pigreci[l] = sommawi/taglia;
+                        if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                         muascisse[l] /= sommawi;
                         muordinate[l] /= sommawi;
                         // Riazzeriamo nello stesso ciclo le stime delle matrici di covarianze.
@@ -3753,7 +3995,12 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double sommawi = sommewi[l];
-                        if (sommawi < 0.000001){sommawi += 0.000001;}
+                        if (sommawi < 0.000001){
+                            sigma11[l] = 0.01;
+                            sigma22[l] = 0.01;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         sigma11[l] /= sommawi;
                         sigma22[l] /= sommawi;
                         sigma12[l] /= sommawi;
@@ -3761,11 +4008,16 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Delle matrici di covarianze calcoliamo anche le inverse.
                     // Usiamo come sempre la regolarizzazione di Tikhonov.
                     for (int l = 0; l < i; l++) {
-                        const double covarianza = sigma12[l];
+                        const double prodottovarianze = std::sqrt(sigma11[l]*sigma22[l]);
+                        double covarianza = sigma12[l];
+                        if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                            covarianza = std::copysign(prodottovarianze, covarianza);
+                            sigma12[l] = covarianza;
+                        }
                         double determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         if (determinante < 0.000001) {
-                            sigma11[l] += 0.00001;
-                            sigma22[l] += 0.00001;
+                            sigma11[l] += 0.001;
+                            sigma22[l] += 0.001;
                             determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         }
                         determinanti[l] = determinante;
@@ -3776,23 +4028,28 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Se abbiamo passato un quarto delle iterazioni, dopo aver calcolato il valore della
                     // logverosimiglianza vediamo se abbiamo superato il record precedente.
                     logverosimiglianzacorrente = 0.0;
+                    std::vector<double> precostanti(i);
+                    for (int l = 0; l < i; l++) {
+                        precostanti[l] = std::log(pigreci[l])-logduepigreco-std::log(determinanti[l])/2.0;
+                    }
                     for (int l = 0; l < taglia; l++) {
+                        std::vector<double> esponenti(i);
+                        double esponentemassimo = -std::numeric_limits<double>::infinity();
                         const double ascissa = ascisse[l];
                         const double ordinata = ordinate[l];
-                        long double sommatoria = 0.0;
                         for (int m = 0; m < i; m++) {
                             const double differenzaascissa = ascissa - muascisse[m];
                             const double differenzaordinata = ordinata - muordinate[m];
-                            const long double esponenziale = -0.5L * inverse11[m] * differenzaascissa * differenzaascissa +
-                                                        2.0L * inverse12[m] * differenzaascissa * differenzaordinata
-                                                        + inverse22[m] * differenzaordinata * differenzaordinata;
-                            const long double membro = -1.0L / (2.0L * pigreco * std::sqrt(determinanti[m])) *
-                                                  std::exp(esponenziale) * pigreci[m];
-                            sommatoria += membro;
-                            verosimiglianzepigreci[l][m] = membro;
+                            const double esponente = precostanti[m]-(inverse11[m]*differenzaascissa*differenzaascissa+
+                                2.0*inverse12[m]*differenzaascissa*differenzaordinata+inverse22[m]*differenzaordinata*
+                                    differenzaordinata)/2.0;
+                            esponenti[m] = esponente;
+                            if (esponente > esponentemassimo){esponentemassimo = esponente;}
                         }
-                        if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                        logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                        logverosimiglianzepigreci[l] = esponenti;
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                        logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                     }
                     if (k > sogliacontrollo && logverosimiglianzacorrente > logverosimiglianzavincente){
                         logverosimiglianzavincente = logverosimiglianzacorrente;
@@ -3816,14 +4073,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Per prima cosa sfruttiamo le logverosimiglianze calcolate all'iterazione
                     // precedente per trovare i pesi w_{ig}.
                     for (int l = 0; l < taglia; l++) {
-                        std::vector<long double> wi = verosimiglianzepigreci[l];
-                        long double denominatorepesi = 0.0L;
-                        for (int m = 0; m < i; m++) {
-                            denominatorepesi += wi[m];
+                        std::vector<double> wi = logverosimiglianzepigreci[l];
+                        double wimassimo = wi[0];
+                        for (int m = 1; m < i; m++) {
+                            if (wi[m] > wimassimo){wimassimo = wi[m];}
                         }
-                        for (int m = 0; m < i; m++) {
-                            if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                            else {pesi[l][m] = wi[m] / denominatorepesi;}
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                        if (sommatoria <= 0.0) {
+                            for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                        } else {
+                            for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                         }
                     }
                     // L'algoritmo SEM differisce dall'EM perché una volta calcolati i pesi w_{ig},
@@ -3865,6 +4125,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         muascisse[l] = 0.0;
                         muordinate[l] = 0.0;
                         pigreci[l] = sommewi[l]/taglia;
+                        if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                     }
                     std::vector<double> denominatori(i, 0.0);
                     for (int l = 0; l < taglia; l++) {
@@ -3881,7 +4142,14 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double denominatore = denominatori[l];
-                        if (denominatore < 0.000001){denominatore += 0.000001;}
+                        if (denominatore < 0.000001){
+                            muascisse[l] = inizializzatore(generatore);
+                            muordinate[l] = inizializzatore(generatore);
+                            sigma11[l] = 0.0;
+                            sigma22[l] = 0.0;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         muascisse[l] /= denominatore;
                         muordinate[l] /= denominatore;
                         // Riazzeriamo nello stesso ciclo le stime delle matrici di covarianze.
@@ -3905,18 +4173,28 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     }
                     for (int l = 0; l < i; l++) {
                         double sommawi = sommewi[l];
-                        if (sommawi < 0.000001){sommawi += 0.000001;}
+                        if (sommawi < 0.000001){
+                            sigma11[l] = 0.01;
+                            sigma22[l] = 0.01;
+                            sigma12[l] = 0.0;
+                            continue;
+                        }
                         sigma11[l] /= sommawi;
                         sigma22[l] /= sommawi;
                         sigma12[l] /= sommawi;
                     }
                     // Inoltre calcoliamo le inverse e i determinanti di tali matrici.
                     for (int l = 0; l < i; l++) {
-                        const double covarianza = sigma12[l];
+                        const double prodottovarianze = std::sqrt(sigma11[l]*sigma22[l]);
+                        double covarianza = sigma12[l];
+                        if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                            covarianza = std::copysign(prodottovarianze, covarianza);
+                            sigma12[l] = covarianza;
+                        }
                         double determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         if (determinante < 0.000001) {
-                            sigma11[l] += 0.00001;
-                            sigma22[l] += 0.00001;
+                            sigma11[l] += 0.001;
+                            sigma22[l] += 0.001;
                             determinante = sigma11[l]*sigma22[l]-covarianza*covarianza;
                         }
                         determinanti[l] = determinante;
@@ -3927,10 +4205,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Per trovare la stima aggiornata dei gradi di libertà, dobbiamo risolvere (con un metodo
                     // iterativo) l'equazione -\psi(\nu/2)+log(\nu/2)+1+(1/\nu)\sum_iw_{ig}(logu_{ig}-u_{ig})+
                     // \psi((\nu+2)/2)-log((\nu+2)/2)=0. Useremo il metodo di Newton, dunque l'equazione di
-                    // aggiornamento sarà x_t=x_{t-1}-f(x_{t-1})/f'(x_{t-1}). Ricordiamo che la derivata di questa
-                    // funzione è -0.5\psi'(\nu/2)+1/\nu-(1/\nu^2)\sum_iw_{ig}(logy_{ig}-u_{ig})+
-                    // 0.5\psi'((\nu+2)/2)-1/(\nu+2). Per ragioni di velocità, calcoleremo le sommatorie prima
-                    // del resto.
+                    // aggiornamento sarà x_t=x_{t-1}-f(x_{t-1})/f'(x_{t-1}).
                     std::vector<double> sommeru(i, 0.0);
                     for (int l = 0; l < taglia; l++) {
                         const std::vector<double> rigapseudi = pseudi[l];
@@ -3941,85 +4216,73 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                             sommeru[m] += rigapseudi[m]*(std::log(u)-u);
                         }
                     }
-                    for (int l = 0; l < i; l++) {
-                        int grado = nu[l];
-                        if (grado < 1){grado = 1;}
-                        double grado2 = grado/2.0;
-                        double grado21 = grado2+1.0;
-                        const double loggrado2 = std::log(grado2);
-                        const double loggrado21 = std::log(grado21);
-                        const double unosugrado2 = 1.0/(grado+2.0);
-                        const double sommaru = sommeru[l];
-                        // Usiamo questo algoritmo per calcolare \psi((\nu+2)/2).
-                        double digamma21 = 0.0;
-                        while (grado21 < 6.0) {
-                            digamma21 -= 1.0 / grado21;
-                            grado21++;
+                    for (int l = 0; l < i; l++){
+                        double grado = nu[l];
+                        if (grado <= 0.0){grado = 0.001;}
+                        const double gradoiniziale = grado;
+                        double grado1 = gradoiniziale/2.0+1.0;
+                        double digamma1 = 0.0;
+                        while (grado1 < 6.0) {
+                            digamma1 -= 1.0/grado1;
+                            grado1++;
                         }
-                        const double xx = 1.0 / grado21;
-                        const double xx2 = xx*xx;
-                        const double xx4 = xx2*xx2;
-                        digamma21 += std::log(grado21)-xx/2.0-xx2/12.0+xx4/120.0-xx4*xx2/252.0;
-                        // Similmente calcoliamo \psi(\nu/2).
-                        double digamma2 = 0.0;
-                        while (grado2 < 6.0) {
-                            digamma2 -= 1.0 / grado2;
-                            grado2++;
+                        const double g2 = grado1*grado1;
+                        const double g4 = g2*g2;
+                        const double g8 = g4*g4;
+                        digamma1 += std::log(grado1)-1.0/(2.0*grado1)-1.0/(12.0*g2)+1.0/(120.0*g4)-1.0/(252.0*g4*g2)+
+                            1.0/(240.0*g8)-1.0/(132.0*g8*g2);
+                        const double costantenumeratore = digamma1+1.0+sommeru[l]/sommewi[l];
+                        for (int m = 0; m < 20; m++) {
+                            double grado2 = grado/2.0;
+                            double digamma2 = 0.0;
+                            double trigamma = 0.0;
+                            while (grado2 < 6.0) {
+                                digamma2 -= 1.0/grado2;
+                                trigamma += 1.0/(grado2*grado2);
+                                grado2++;
+                            }
+                            const double gg2 = grado2*grado2;
+                            const double gg4 = gg2*gg2;
+                            const double gg8 = gg4*gg4;
+                            digamma2 += std::log(grado2)-1.0/(2.0*grado2)-1.0/(12.0*gg2)+1.0/(120.0*gg4)-
+                                1.0/(252.0*gg4*gg2)+1.0/(240.0*gg8)-1.0/(132.0*gg8*gg2);
+                            trigamma += 1.0/grado2+1.0/(2.0*gg2)+1.0/(6.0*gg2*grado2)-1.0/(30.0*gg4*grado2)+
+                                1.0/(42.0*gg4*gg2*grado2)-1.0/(30.0*gg8*grado2)+10.0/(132.0*gg8*gg2*grado2);
+                            const double logaritmo = std::log(grado/(gradoiniziale+2.0));
+                            const double reciproco = 1.0/grado;
+                            grado -= (costantenumeratore-digamma2+logaritmo)/(reciproco-0.5*trigamma);
+                            if (grado <= 0.0){grado = 0.001;}
+                            if (grado > 200.0){grado = 200.0;}
                         }
-                        const double xxx = 1.0 / grado2;
-                        const double xxx2 = xxx*xxx;
-                        const double xxx4 = xxx2*xxx2;
-                        digamma2 += std::log(grado2)-xxx/2.0-xxx2/12.0+xxx4/120.0-xxx4*xxx2/252.0;
-                        const double numeratore = -digamma2+loggrado2+1.0+sommaru/grado+digamma21-loggrado21;
-                        grado2 = grado/2.0;
-                        // Con quest'altro algoritmo approssimiamo la funzione trigamma, ossia \psi'(\nu/2).
-                        double trigamma2 = 0.0;
-                        while (grado2 < 6.0) {
-                            trigamma2 += 1.0 / (grado2 * grado2);
-                            grado2++;
-                        }
-                        const double xxxx = 1.0 / grado2;
-                        const double xxxx2 = xxxx * xxxx;
-                        trigamma2 += xxxx / 2.0 + xxxx2 / 6.0 - xxxx2 * xxxx2 / 30.0 + xxxx2 * xxxx2 * xxxx2 / 42.0;
-                        // E infine approssimiamo \psi'((\nu+2)/2).
-                        grado21 = grado/2.0+1.0;
-                        double trigamma21 = 0.0;
-                        while (grado21 < 6.0) {
-                            trigamma21 += 1.0/(grado21*grado21);
-                            grado21++;
-                        }
-                        const double xxxxx = 1.0/grado21;
-                        const double xxxxx2 = xxxxx*xxxxx;
-                        trigamma21 += xxxxx/2.0+xxxxx2/6.0-xxxxx2*xxxxx2/30.0+xxxxx2*xxxxx2*xxxxx2/42.0;
-                        const double denominatore = -trigamma2/2.0+1.0/grado-sommaru/(grado*grado)+
-                            trigamma21/2.0-unosugrado2;
-                        if (grado-numeratore/denominatore){nu[l] = 1;}
-                        else {nu[l] = static_cast<int>(std::round(grado-numeratore/denominatore));}
+                        nu[l] = grado;
                     }
                     logverosimiglianzacorrente = 0.0;
                     // Iniziamo calcolando le costanti \Gamma((\nu+2)/2)/(\Gamma(\nu/2)\nu\pi).
                     std::vector<double> precostanti(i);
                     for (int l = 0; l < i; l++) {
-                        const int grado = nu[l];
-                        precostanti[l] = std::tgamma(grado/2.0+1.0)/(std::tgamma(grado/2.0)*grado*pigreco);
+                        const double grado = nu[l];
+                        precostanti[l] = std::log(pigreci[l])+std::lgamma(grado/2.0+1.0)-std::log(grado*pigreco)-
+                            std::log(determinanti[l])/2.0-std::lgamma(grado/2.0);
                     }
                     for (int l = 0; l < taglia; l++) {
+                        std::vector<double> esponenti(i);
+                        double esponentemassimo = -std::numeric_limits<double>::infinity();
                         const double ascissa = ascisse[l];
                         const double ordinata = ordinate[l];
-                        long double sommatoria = 0.0;
                         for (int m = 0; m < i; m++){
                             const double differenzaascisse = ascissa-muascisse[m];
                             const double differenzaordinate = ordinata-muordinate[m];
-                            const int grado = nu[m];
-                            const long double membro =  precostanti[m]/std::sqrt(determinanti[m])*std::pow(1.0L+
-                                (inverse11[m]*differenzaascisse*differenzaascisse+2.0L*inverse12[m]*
-                                    differenzaascisse*differenzaordinate+inverse22[m]*differenzaordinate*
-                                    differenzaordinate)/grado, -grado/2.0L-1.0L)*pigreci[m];
-                            sommatoria += membro;
-                            verosimiglianzepigreci[l][m] = membro;
+                            const double grado = nu[m];
+                            const double esponente = precostanti[m]-(grado+2.0)/2.0*std::log(1.0+(inverse11[m]*
+                                differenzaascisse*differenzaascisse+2.0*inverse12[m]*differenzaascisse*differenzaordinate+
+                                    inverse22[m]*differenzaordinate*differenzaordinate)/grado);
+                            esponenti[m] = esponente;
+                            if (esponente > esponentemassimo){esponentemassimo = esponente;}
                         }
-                        if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                        logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                        logverosimiglianzepigreci[l] = esponenti;
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                        logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                     }
                     // Se siamo a oltre un quarto delle iterazioni, dopo aver calcolato il valore della
                     // logverosimiglianza vediamo se supera il record attuale.
@@ -4076,14 +4339,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Per prima cosa sfruttiamo le logverosimiglianze calcolate all'iterazione
                     // precedente per trovare i pesi w_{ig}.
                     for (int l = 0; l < taglia; l++) {
-                        std::vector<long double> wi = verosimiglianzepigreci[l];
-                        long double denominatorepesi = 0.0L;
-                        for (int m = 0; m < i; m++) {
-                            denominatorepesi += wi[m];
+                        std::vector<double> wi = logverosimiglianzepigreci[l];
+                        double wimassimo = wi[0];
+                        for (int m = 1; m < i; m++) {
+                            if (wi[m] > wimassimo){wimassimo = wi[m];}
                         }
-                        for (int m = 0; m < i; m++) {
-                            if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                            else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++) {sommatoria += std::exp(wi[m]-wimassimo);}
+                        if (sommatoria <= 0.0) {
+                            for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                        } else {
+                            for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                         }
                     }
                     // La differenza dell'algoritmo CEM rispetto all'EM è che dopo aver aggiornato
@@ -4091,8 +4357,8 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // al cluster g per cui w_{ig} è massimo; in seguito, quando ciascun parametro
                     // viene aggiornato, nelle formule vengono utilizzati solo i dati che sono stati
                     // assegnati al cluster corrispondente.
-                    std::vector<std::vector<double>> ascissepartizione(i);
-                    std::vector<std::vector<double>> ordinatepartizione(i);
+                    std::vector<std::vector<double>> ascissepartizione(i, std::vector<double>(taglia));
+                    std::vector<std::vector<double>> ordinatepartizione(i, std::vector<double>(taglia));
                     std::vector<int> tagliepartizione(i, 0);
                     for (int l = 0; l < taglia; l++) {
                         double pesomaggiore = pesi[l][0];
@@ -4103,8 +4369,9 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                 clusterunita = m;
                             }
                         }
-                        ascissepartizione[clusterunita].push_back(ascisse[l]);
-                        ordinatepartizione[clusterunita].push_back(ordinate[l]);
+                        const int indice = tagliepartizione[clusterunita];
+                        ascissepartizione[clusterunita][indice] = ascisse[l];
+                        ordinatepartizione[clusterunita][indice] = ordinate[l];
                         tagliepartizione[clusterunita]++;
                     }
                     // Per aggiornare le stime dei parametri, nel caso del CEM, non è necessario
@@ -4113,7 +4380,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Ora aggiorniamo la stima dei parametri.
                     for (int l = 0; l < i; l++) {
                         const int tagliapartizione = tagliepartizione[l];
-                        if (tagliapartizione != 0){
+                        if (tagliapartizione > 1){
                             const std::vector<double> ascissecorrenti = ascissepartizione[l];
                             const std::vector<double> ordinatecorrenti = ordinatepartizione[l];
                             double mediaascissecorrente = 0.0;
@@ -4123,6 +4390,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                 mediaordinatecorrente += ordinatecorrenti[m];
                             }
                             pigreci[l] = static_cast<double>(tagliapartizione)/taglia;
+                            if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                             mediaascissecorrente /= tagliapartizione;
                             mediaordinatecorrente /= tagliapartizione;
                             muascisse[l] = mediaascissecorrente;
@@ -4142,10 +4410,14 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                 varianzaordinate /= tagliapartizione-1;
                                 covarianza /= tagliapartizione-1;
                             }
+                            const double prodottovarianze = std::sqrt(varianzaascisse*varianzaordinate);
+                            if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                                covarianza = std::copysign(prodottovarianze, covarianza);
+                            }
                             double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
-                            if (determinante == 0.0) {
-                                varianzaascisse += 0.00001;
-                                varianzaordinate += 0.00001;
+                            if (determinante < 0.000001) {
+                                varianzaascisse += 0.001;
+                                varianzaordinate += 0.001;
                                 determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
                             }
                             inverse11[l] = varianzaordinate/determinante;
@@ -4154,28 +4426,45 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                             sigma11[l] = varianzaascisse;
                             sigma22[l] = varianzaordinate;
                             sigma12[l] = covarianza;
-                        } else {pigreci[l] = 0.0;}
+                            determinanti[l] = determinante;
+                        } else {
+                            pigreci[l] = piminimo;
+                            muascisse[l] = inizializzatore(generatore);
+                            muordinate[l] = inizializzatore(generatore);
+                            sigma11[l] = 0.01;
+                            sigma22[l] = 0.01;
+                            sigma12[l] = 0.0;
+                            inverse11[l] = 100.0;
+                            inverse22[l] = 100.0;
+                            inverse12[l] = 0.0;
+                            determinanti[l] = 0.0001;
+                        }
                     }
                     // Adesso calcoliamo il valore attuale della logverosimiglianza.
                     logverosimiglianzeprecedenti = {logverosimiglianzeprecedenti[1], logverosimiglianzacorrente};
                     logverosimiglianzacorrente = 0.0;
+                    std::vector<double> precostanti(i);
+                    for (int l = 0; l < i; l++) {
+                        precostanti[l] = std::log(pigreci[l])-logduepigreco-std::log(determinanti[l])/2.0;
+                    }
                     for (int l = 0; l < taglia; l++) {
+                        std::vector<double> esponenti(i);
+                        double esponentemassimo = -std::numeric_limits<double>::infinity();
                         const double ascissa = ascisse[l];
                         const double ordinata = ordinate[l];
-                        long double sommatoria = 0.0L;
                         for (int m = 0; m < i; m++) {
                             const double differenzaascissa = ascissa-muascisse[m];
                             const double differenzaordinata = ordinata-muordinate[m];
-                            const long double esponenziale = -0.5L*inverse11[m]*differenzaascissa*differenzaascissa+
-                                2.0L*inverse12[m]*differenzaascissa*differenzaordinata
-                                +inverse22[m]*differenzaordinata*differenzaordinata;
-                            const long double membro = -1.0L/(2.0L*pigreco*std::sqrt(determinanti[m]))*
-                                std::exp(esponenziale)*pigreci[m];
-                            sommatoria += membro;
-                            verosimiglianzepigreci[l][m] = membro;
+                            const double esponente = precostanti[m]-(inverse11[m]*differenzaascissa*differenzaascissa+
+                                2.0*inverse12[m]*differenzaascissa*differenzaordinata+inverse22[m]*differenzaordinata*
+                                    differenzaordinata)/2.0;
+                            esponenti[m] = esponente;
+                            if (esponente > esponentemassimo){esponentemassimo = esponente;}
                         }
-                        if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                        logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                        logverosimiglianzepigreci[l] = esponenti;
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                        logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                     }
                     // Dalla seconda iterazione in poi, utilizziamo l'accelerazione di Aitken
                     // per controllare la convergenza. Se la regola d'arresto |l_\infty-l_{r-1}|<\epsilon
@@ -4183,8 +4472,9 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     if (k != 0) {
                         const double precedente = logverosimiglianzeprecedenti[1];
                         if (precedente-logverosimiglianzeprecedenti[0] < 0.000001){break;}
-                        const double accelerazione = (logverosimiglianzacorrente - precedente) /
-                            (precedente - logverosimiglianzeprecedenti[0]);
+			            double accelerazione = (logverosimiglianzacorrente - precedente) /
+			                (precedente - logverosimiglianzeprecedenti[0]);
+			            if (accelerazione == 1.0) {accelerazione -= 0.000001;}
                         const double linfinito = precedente + 1.0 / (1.0 - accelerazione) *
                             (logverosimiglianzacorrente - precedente);
                         if (std::abs(linfinito - precedente) < sogliaconvergenza) { break; }
@@ -4196,14 +4486,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Per prima cosa sfruttiamo le logverosimiglianze calcolate all'iterazione
                     // precedente per trovare i pesi w_{ig}.
                     for (int l = 0; l < taglia; l++) {
-                        std::vector<long double> wi = verosimiglianzepigreci[l];
-                        long double denominatorepesi = 0.0L;
-                        for (int m = 0; m < i; m++) {
-                            denominatorepesi += wi[m];
+                        std::vector<double> wi = logverosimiglianzepigreci[l];
+                        double wimassimo = wi[0];
+                        for (int m = 1; m < i; m++) {
+                            if (wi[m] > wimassimo){wimassimo = wi[m];}
                         }
-                        for (int m = 0; m < i; m++) {
-                            if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                            else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                        if (sommatoria <= 0.0){
+                            for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                        } else {
+                            for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                         }
                     }
                     // Adesso calcoliamo anche i pesi u_{ig}, che ricordiamo essere
@@ -4227,9 +4520,9 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // al cluster g per cui w_{ig} è massimo; in seguito, quando ciascun parametro
                     // viene aggiornato, nelle formule vengono utilizzati solo i dati che sono stati
                     // assegnati al cluster corrispondente.
-                    std::vector<std::vector<double>> ascissepartizione(i);
-                    std::vector<std::vector<double>> ordinatepartizione(i);
-                    std::vector<std::vector<double>> upartizione(i);
+                    std::vector<std::vector<double>> ascissepartizione(i, std::vector<double>(taglia));
+                    std::vector<std::vector<double>> ordinatepartizione(i, std::vector<double>(taglia));
+                    std::vector<std::vector<double>> upartizione(i, std::vector<double>(taglia));
                     std::vector<int> tagliepartizione(i, 0);
                     for (int l = 0; l < taglia; l++) {
                         double pesomaggiore = pesi[l][0];
@@ -4240,9 +4533,10 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                 clusterunita = m;
                             }
                         }
-                        ascissepartizione[clusterunita].push_back(ascisse[l]);
-                        ordinatepartizione[clusterunita].push_back(ordinate[l]);
-                        upartizione[clusterunita].push_back(uig[l][clusterunita]);
+                        const int indice = tagliepartizione[clusterunita];
+                        ascissepartizione[clusterunita][indice] = ascisse[l];
+                        ordinatepartizione[clusterunita][indice] = ordinate[l];
+                        upartizione[clusterunita][indice] = uig[l][clusterunita];
                         tagliepartizione[clusterunita]++;
                     }
                     // Ora aggiorniamo la stima dei parametri.
@@ -4262,98 +4556,110 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                 denominatore += u;
                             }
                             pigreci[l] = static_cast<double>(tagliapartizione)/taglia;
-                            if (denominatore < 0.000001){denominatore += 0.000001;}
-                            mediaascissecorrente /= denominatore;
-                            mediaordinatecorrente /= denominatore;
-                            muascisse[l] = mediaascissecorrente;
-                            muordinate[l] = mediaordinatecorrente;
-                            double varianzaascisse = 0.0;
-                            double varianzaordinate = 0.0;
-                            double covarianza = 0.0;
-                            for (int m = 0; m < tagliapartizione; m++) {
-                                const double u = ucorrenti[m];
-                                const double differenzaascisse = ascissecorrenti[m]-mediaascissecorrente;
-                                const double differenzaordinate = ordinatecorrenti[m]-mediaordinatecorrente;
-                                varianzaascisse += u*differenzaascisse*differenzaascisse;
-                                varianzaordinate += u*differenzaordinate*differenzaordinate;
-                                covarianza += u*differenzaascisse*differenzaordinate;
-                            }
-                            if (tagliapartizione != 1) {
+                            if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
+                            if (denominatore >= 0.000001 && tagliapartizione != 1){
+                                mediaascissecorrente /= denominatore;
+                                mediaordinatecorrente /= denominatore;
+                                muascisse[l] = mediaascissecorrente;
+                                muordinate[l] = mediaordinatecorrente;
+                                double varianzaascisse = 0.0;
+                                double varianzaordinate = 0.0;
+                                double covarianza = 0.0;
+                                for (int m = 0; m < tagliapartizione; m++) {
+                                    const double u = ucorrenti[m];
+                                    const double differenzaascisse = ascissecorrenti[m]-mediaascissecorrente;
+                                    const double differenzaordinate = ordinatecorrenti[m]-mediaordinatecorrente;
+                                    varianzaascisse += u*differenzaascisse*differenzaascisse;
+                                    varianzaordinate += u*differenzaordinate*differenzaordinate;
+                                    covarianza += u*differenzaascisse*differenzaordinate;
+                                }
                                 varianzaascisse /= tagliapartizione-1;
                                 varianzaordinate /= tagliapartizione-1;
                                 covarianza /= tagliapartizione-1;
+                                const double prodottovarianze = std::sqrt(varianzaascisse*varianzaordinate);
+                                if (covarianza < -prodottovarianze || covarianza > prodottovarianze){
+                                   covarianza = std::copysign(prodottovarianze, covarianza);
+                                   }
+                                double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
+                                if (determinante < 0.000001) {
+                                    varianzaascisse += 0.001;
+                                    varianzaordinate += 0.001;
+                                    determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
+                                }
+                                inverse11[l] = varianzaordinate/determinante;
+                                inverse22[l] = varianzaascisse/determinante;
+                                inverse12[l] = -covarianza/determinante;
+                                sigma11[l] = varianzaascisse;
+                                sigma22[l] = varianzaordinate;
+                                sigma12[l] = covarianza;
+                                determinanti[l] = determinante;
+                            } else {
+                                pigreci[l] = piminimo;
+                                muascisse[l] = inizializzatore(generatore);
+                                muordinate[l] = inizializzatore(generatore);
+                                sigma11[l] = 0.01;
+                                sigma22[l] = 0.01;
+                                sigma12[l] = 0.0;
+                                inverse11[l] = 100.0;
+                                inverse22[l] = 100.0;
+                                inverse12[l] = 0.0;
+                                determinanti[l] = 0.0001;
                             }
-                            double determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
-                            if (determinante < 0.000001) {
-                                varianzaascisse += 0.00001;
-                                varianzaordinate += 0.00001;
-                                determinante = varianzaascisse*varianzaordinate-covarianza*covarianza;
+                            double grado = nu[l];
+                            if (grado <= 0.0){grado = 0.001;}
+                            const double gradoiniziale = grado;
+                            double grado1 = gradoiniziale/2.0+1.0;
+                            double digamma1 = 0.0;
+                            while (grado1 < 6.0) {
+                                digamma1 -= 1.0/grado1;
+                                grado1++;
                             }
-                            inverse11[l] = varianzaordinate/determinante;
-                            inverse22[l] = varianzaascisse/determinante;
-                            inverse12[l] = -covarianza/determinante;
-                            sigma11[l] = varianzaascisse;
-                            sigma22[l] = varianzaordinate;
-                            sigma12[l] = covarianza;
-                            int grado = nu[l];
-                            if (grado < 1){grado = 1;}
-                            double grado2 = grado/2.0;
-                            double grado21 = grado2+1.0;
-                            const double loggrado2 = std::log(grado2);
-                            const double loggrado21 = std::log(grado21);
-                            const double unosugrado2 = 1.0/(grado+2.0);
+                            const double g2 = grado1*grado1;
+                            const double g4 = g2*g2;
+                            const double g8 = g4*g4;
+                            digamma1 += std::log(grado1)-1.0/(2.0*grado1)-1.0/(12.0*g2)+1.0/(120.0*g4)-1.0/(252.0*g4*g2)+
+                                1.0/(240.0*g8)-1.0/(132.0*g8*g2);
                             double sommaru = 0.0;
                             for (int m = 0; m < tagliapartizione; m++) {
                                 double u = ucorrenti[m];
                                 if (u < 0.000001){u += 0.000001;}
                                 sommaru += std::log(u)-u;
                             }
-                            // Usiamo questo algoritmo per calcolare \psi((\nu+2)/2).
-                            double digamma21 = 0.0;
-                            while (grado21 < 6.0) {
-                                digamma21 -= 1.0 / grado21;
-                                grado21++;
+                            const double costantenumeratore = digamma1+1.0+sommaru/tagliapartizione;
+                            for (int m = 0; m < 20; m++) {
+                                double grado2 = grado/2.0;
+                                double digamma2 = 0.0;
+                                double trigamma = 0.0;
+                                while (grado2 < 6.0) {
+                                    digamma2 -= 1.0/grado2;
+                                    trigamma += 1.0/(grado2*grado2);
+                                    grado2++;
+                                }
+                                const double gg2 = grado2*grado2;
+                                const double gg4 = gg2*gg2;
+                                const double gg8 = gg4*gg4;
+                                digamma2 += std::log(grado2)-1.0/(2.0*grado2)-1.0/(12.0*gg2)+1.0/(120.0*gg4)-
+                                    1.0/(252.0*gg4*gg2)+1.0/(240.0*gg8)-1.0/(132.0*gg8*gg2);
+                                trigamma += 1.0/grado2+1.0/(2.0*gg2)+1.0/(6.0*gg2*grado2)-1.0/(30.0*gg4*grado2)+
+                                    1.0/(42.0*gg4*gg2*grado2)-1.0/(30.0*gg8*grado2)+10.0/(132.0*gg8*gg2*grado2);
+                                const double logaritmo = std::log(grado/(gradoiniziale+2.0));
+                                const double reciproco = 1.0/grado;
+                                grado -= (costantenumeratore-digamma2+logaritmo)/(reciproco-0.5*trigamma);
+                                if (grado <= 0.0){grado = 0.001;}
+                                if (grado > 200.0){grado = 200.0;}
                             }
-                            const double xx = 1.0 / grado21;
-                            const double xx2 = xx*xx;
-                            const double xx4 = xx2*xx2;
-                            digamma21 += std::log(grado21)-xx/2.0-xx2/12.0+xx4/120.0-xx4*xx2/252.0;
-                            // Similmente calcoliamo \psi(\nu/2).
-                            double digamma2 = 0.0;
-                            while (grado2 < 6.0) {
-                                digamma2 -= 1.0 / grado2;
-                                grado2++;
-                            }
-                            const double xxx = 1.0 / grado2;
-                            const double xxx2 = xxx*xxx;
-                            const double xxx4 = xxx2*xxx2;
-                            digamma2 += std::log(grado2)-xxx/2.0-xxx2/12.0+xxx4/120.0-xxx4*xxx2/252.0;
-                            const double numeratore = -digamma2+loggrado2+1.0+sommaru/grado+digamma21-loggrado21;
-                            grado2 = grado/2.0;
-                            // Con quest'altro algoritmo approssimiamo la funzione trigamma, ossia \psi'(\nu/2).
-                            double trigamma2 = 0.0;
-                            while (grado2 < 6.0) {
-                                trigamma2 += 1.0 / (grado2 * grado2);
-                                grado2++;
-                            }
-                            const double xxxx = 1.0 / grado2;
-                            const double xxxx2 = xxxx * xxxx;
-                            trigamma2 += xxxx / 2.0 + xxxx2 / 6.0 - xxxx2 * xxxx2 / 30.0 + xxxx2 * xxxx2 * xxxx2 / 42.0;
-                            // E infine approssimiamo \psi'((\nu+2)/2).
-                            grado21 = grado/2.0+1.0;
-                            double trigamma21 = 0.0;
-                            while (grado21 < 6.0) {
-                                trigamma21 += 1.0/(grado21*grado21);
-                                grado21++;
-                            }
-                            const double xxxxx = 1.0/grado21;
-                            const double xxxxx2 = xxxxx*xxxxx;
-                            trigamma21 += xxxxx/2.0+xxxxx2/6.0-xxxxx2*xxxxx2/30.0+xxxxx2*xxxxx2*xxxxx2/42.0;
-                            const double denominatore2 = -trigamma2/2.0+1.0/grado-sommaru/(grado*grado)+
-                                trigamma21/2.0-unosugrado2;
-                            if (grado-numeratore/denominatore2 < 1.0){nu[l] = 1;}
-                            else {nu[l] = static_cast<int>(std::round(grado-numeratore/denominatore2));}
-                        } else {pigreci[l] = 0.0;}
+                            nu[l] = grado;
+                        } else {
+                            pigreci[l] = piminimo;
+                            muascisse[l] = inizializzatore(generatore);
+                            muordinate[l] = inizializzatore(generatore);
+                            sigma11[l] = 0.01;
+                            sigma22[l] = 0.01;
+                            sigma12[l] = 0.0;
+                            inverse11[l] = 100.0;
+                            inverse22[l] = 100.0;
+                            inverse12[l] = 0.0;
+                        }
                     }
                     // Ora calcoliamo la logverosimiglianza.
                     logverosimiglianzeprecedenti = {logverosimiglianzeprecedenti[1], logverosimiglianzacorrente};
@@ -4361,33 +4667,37 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                     // Iniziamo calcolando le costanti \Gamma((\nu+2)/2)/(\Gamma(\nu/2)\nu\pi).
                     std::vector<double> precostanti(i);
                     for (int l = 0; l < i; l++) {
-                        const int grado = nu[l];
-                        precostanti[l] = std::tgamma(grado/2.0+1.0)/(std::tgamma(grado/2.0)*grado*pigreco);
+                        const double grado = nu[l];
+                        precostanti[l] = std::log(pigreci[l])+std::lgamma(grado/2.0+1.0)-std::log(grado*pigreco)-
+                            std::log(determinanti[l])/2.0-std::lgamma(grado/2.0);
                     }
                     for (int l = 0; l < taglia; l++) {
+                        std::vector<double> esponenti(i);
+                        double esponentemassimo = -std::numeric_limits<double>::infinity();
                         const double ascissa = ascisse[l];
                         const double ordinata = ordinate[l];
-                        long double sommatoria = 0.0;
                         for (int m = 0; m < i; m++){
                             const double differenzaascisse = ascissa-muascisse[m];
                             const double differenzaordinate = ordinata-muordinate[m];
-                            const int grado = nu[m];
-                            const long double membro =  precostanti[m]/std::sqrt(determinanti[m])*std::pow(1.0L+
-                                (inverse11[m]*differenzaascisse*differenzaascisse+2.0L*inverse12[m]*
-                                    differenzaascisse*differenzaordinate+inverse22[m]*differenzaordinate*
-                                    differenzaordinate)/grado, -grado/2.0L-1.0L)*pigreci[m];
-                            sommatoria += membro;
-                            verosimiglianzepigreci[l][m] = membro;
+                            const double grado = nu[m];
+                            const double esponente = precostanti[m]-(grado+2.0)/2.0*std::log(1.0+(sigma11[m]*differenzaascisse*
+                                differenzaascisse+2.0*sigma12[m]*differenzaascisse*differenzaordinate+sigma22[m]*
+                                    differenzaordinate*differenzaordinate)/grado);
+                            esponenti[m] = esponente;
+                            if (esponente > esponentemassimo){esponentemassimo = esponente;}
                         }
-                        if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                        logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                        logverosimiglianzepigreci[l] = esponenti;
+                        double sommatoria = 0.0;
+                        for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                        logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                     }
                     // Dalla seconda iterazione in poi controlliamo la convergenza con l'accelerazione di Aitken.
                     if (k != 0) {
                         const double precedente = logverosimiglianzeprecedenti[1];
                         if (precedente-logverosimiglianzeprecedenti[0] < 0.000001){break;}
-                        const double accelerazione = (logverosimiglianzacorrente - precedente)/
-                            (precedente - logverosimiglianzeprecedenti[0]);
+			            double accelerazione = (logverosimiglianzacorrente - precedente) /
+			                (precedente - logverosimiglianzeprecedenti[0]);
+			            if (accelerazione == 1.0) {accelerazione -= 0.000001;}
                         const double linfinito = precedente + 1.0 / (1.0 - accelerazione) *
                             (logverosimiglianzacorrente - precedente);
                         if (std::abs(linfinito - precedente) < sogliaconvergenza) { break; }
@@ -4420,8 +4730,8 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
             logverosimiglianza = logverosimiglianzacorrente;
         }
     } else if (inizializzazione == "casuale") {
-        std::gamma_distribution<> gammavarianze(2, 1);
-        std::uniform_real_distribution<> uniformecorrelazione(0, 1);
+        std::gamma_distribution<> gammavarianze(2.0, 1.0);
+        std::uniform_real_distribution<> uniformecorrelazione(0.0, 1.0);
         std::uniform_real_distribution<> uniformeascisse(minimoascisse, massimoascisse);
         std::uniform_real_distribution<> uniformeordinate(minimoordinate, massimoordinate);
         double logverosimiglianzamassima = -std::numeric_limits<double>::infinity();
@@ -4434,7 +4744,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
             std::vector<double> sigma11(i);
             std::vector<double> sigma22(i);
             std::vector<double> sigma12(i);
-            std::vector<int> nu(i, 5);
+            std::vector<double> nu(i, 5.0);
             for (int k = 0; k < i; k++) {
                 // \pi_g è l'unico parametro inizializzato deterministicamente, e in particolare
                 // sono impostati, per ogni g, a 1/numerocluster.
@@ -4460,12 +4770,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
             std::vector<double> inverse22(i);
             std::vector<double> inverse12(i);
             for (int k = 0; k < i; k++) {
-                const double covarianzacluster = sigma12[k];
+                const double prodottovarianze = std::sqrt(sigma11[k]*sigma22[k]);
+                double covarianzacluster = sigma12[k];
+                if (covarianzacluster < -prodottovarianze || covarianzacluster > prodottovarianze) {
+                    covarianzacluster = std::copysign(prodottovarianze, covarianzacluster);
+                    sigma12[k] = covarianzacluster;
+                }
                 double determinante = sigma11[k]*sigma22[k]-covarianzacluster*covarianzacluster;
                 if (determinante < 0.000001) {
-                    determinante = 0.00001*sigma11[k]+0.00001*sigma22[k]+0.0000000001;
-                    sigma11[k] += 0.00001;
-                    sigma22[k] += 0.00001;
+                    sigma11[k] += 0.001;
+                    sigma22[k] += 0.001;
+                    determinante = sigma11[k]*sigma22[k]-covarianzacluster*covarianzacluster;
                 }
                 determinanti[k] = determinante;
                 inverse11[k] = sigma22[k]/determinante;
@@ -4475,50 +4790,59 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
             // Calcoliamo il valore della logverosimiglianza (delle gaussiane o delle t di Student)
             // con la partizione attuale. Inoltre, salviamo i valori individuali delle verosimiglianze
             // per gli specifici i e g in modo da riusarli dopo.
-            std::vector<std::vector<long double>> verosimiglianzepigreci(taglia, std::vector<long double>(i, 0.0));
+            std::vector<std::vector<double>> logverosimiglianzepigreci(taglia, std::vector<double>(i, 0.0));
             double logverosimiglianzacorrente = 0.0;
+            std::vector<double> precostanti(i);
+            for (int k = 0; k < i; k++) {
+                precostanti[k] = std::log(pigreci[k])-logduepigreco-std::log(determinanti[k])/2.0;
+            }
             if (normale) {
                 for (int k = 0; k < taglia; k++) {
+                    std::vector<double> esponenti(i);
+                    double esponentemassimo = -std::numeric_limits<double>::infinity();
                     const double ascissa = ascisse[k];
                     const double ordinata = ordinate[k];
-                    long double sommatoria = 0.0L;
                     for (int l = 0; l < i; l++) {
                         const double differenzaascissa = ascissa - muascisse[l];
                         const double differenzaordinata = ordinata - muordinate[l];
-                        const long double esponenziale = -0.5L * inverse11[l] * differenzaascissa * differenzaascissa +
-                                                    2.0L * inverse12[l] * differenzaascissa * differenzaordinata
-                                                    + inverse22[l] * differenzaordinata * differenzaordinata;
-                        const long double membro = -1.0L / (2.0L * pigreco * std::sqrt(determinanti[l])) *
-                                              std::exp(esponenziale) * pigreci[l];
-                        sommatoria += membro;
-                        verosimiglianzepigreci[k][l] = membro;
+                        const double esponente = precostanti[l]-(inverse11[l]*differenzaascissa*differenzaascissa+
+                            2.0*inverse12[l]*differenzaascissa*differenzaordinata+inverse22[l]*differenzaordinata*
+                                differenzaordinata)/2.0;
+                        esponenti[l] = esponente;
+                        if (esponente > esponentemassimo){esponentemassimo = esponente;}
                     }
-                    if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                    logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                    logverosimiglianzepigreci[k] = esponenti;
+                    double sommatoria = 0.0;
+                    for (int l = 0; l < i; l++){sommatoria += std::exp(esponenti[l]-esponentemassimo);}
+                    logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                 }
             } else {
-                const double precostante = std::tgamma(3.5) / (std::tgamma(2.5) * pigreco * 5.0);
+                for (int k = 0; k < i; k++) {
+                    precostanti[k] = std::log(pigreci[k])+std::lgamma(3.5)-std::log(5.0*pigreco)-
+                        std::log(determinanti[k])/2.0-std::lgamma(2.5);
+                }
                 for (int k = 0; k < taglia; k++) {
+                    std::vector<double> esponenti(i);
+                    double esponentemassimo = -std::numeric_limits<double>::infinity();
                     const double ascissa = ascisse[k];
-                    const double ordinata = ascisse[k];
-                    long double sommatoria = 0.0L;
+                    const double ordinata = ordinate[k];
                     for (int l = 0; l < i; l++) {
                         const double differenzaascissa = ascissa - muascisse[l];
                         const double differenzaordinata = ordinata - muordinate[l];
-                        const long double membro = precostante / std::sqrt(determinanti[l]) * std::pow(1.0L + 0.2L *
-                                                  (inverse11[l] * differenzaascissa * differenzaascissa + 2.0L *
-                                                   inverse12[l] * differenzaascissa *
-                                                   differenzaordinata + inverse22[l] * differenzaordinata *
-                                                   differenzaordinata), -3.5L) * pigreci[l];
-                        sommatoria += membro;
-                        verosimiglianzepigreci[k][l] = membro;
+                        const double esponente = precostanti[l]-3.5*std::log(1.0+(inverse11[l]*differenzaascissa*
+                            differenzaascissa+2.0*inverse12[l]*differenzaascissa*differenzaordinata+inverse22[l]*
+                                differenzaordinata*differenzaordinata)/5.0);
+                        esponenti[l] = esponente;
+                        if (esponente > esponentemassimo){esponentemassimo = esponente;}
                     }
-                    if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                    logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                    logverosimiglianzepigreci[k] = esponenti;
+                    double sommatoria = 0.0;
+                    for (int l = 0; l < i; l++){sommatoria += std::exp(esponenti[l]-esponentemassimo);}
+                    logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                 }
             }
             // Inizializziamo il vettore di pesi w_{ig} e poi avviamo l'algoritmo iterativo di stima dei parametri.
-            std::vector<std::vector<double> > pesi(taglia, std::vector<double>(i, 0.0));
+            std::vector<std::vector<double>> pesi(taglia, std::vector<double>(i, 0.0));
             if (algoritmo == "EM") {
                 // Prepariamo un array che contenga le logverosimiglianze delle due iterazioni precedenti, in
                 // modo da poter usare l'accelerazione di Aitken e monitorare la convergenza.
@@ -4532,14 +4856,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                             // Ricordiamo che w_{ig}=\pi_gf_g/\sum_g\pi_gf_g. Abbiamo già immagazzinato
                             // le quantità \pi_gf_g in verosimiglianzepigreci,
                             // e "denominatorepesi" sarà la loro somma per i fissato.
-                            std::vector<long double> wi = verosimiglianzepigreci[l];
-                            long double denominatorepesi = 0.0L;
-                            for (int m = 0; m < i; m++) {
-                                denominatorepesi += wi[m];
+                            std::vector<double> wi = logverosimiglianzepigreci[l];
+                            double wimassimo = wi[0];
+                            for (int m = 1; m < i; m++) {
+                                if (wi[m] > wimassimo){wimassimo = wi[m];}
                             }
-                            for (int m = 0; m < i; m++) {
-                                if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                                else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                            double sommatoria = 0.0;
+                            for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                            if (sommatoria <= 0.0) {
+                                for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                            } else {
+                                for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                             }
                         }
                         // Per aggiornare le stime dei parametri, ci serve conoscere \sum_iw_{ig}.
@@ -4566,8 +4893,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         }
                         for (int l = 0; l < i; l++) {
                             double sommawi = sommewi[l];
-                            if (sommawi < 0.000001){sommawi += 0.000001;}
+                            if (sommawi < 0.000001){
+                                pigreci[l] = piminimo;
+                                muascisse[l] = inizializzatore(generatore);
+                                muordinate[l] = inizializzatore(generatore);
+                                sigma11[l] = 0.0;
+                                sigma22[l] = 0.0;
+                                sigma12[l] = 0.0;
+                                continue;
+                            }
                             pigreci[l] = sommawi / taglia;
+                            if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                             muascisse[l] /= sommawi;
                             muordinate[l] /= sommawi;
                             // Riazzeriamo nello stesso ciclo le stime delle matrici di covarianze.
@@ -4591,7 +4927,12 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         }
                         for (int l = 0; l < i; l++) {
                             double sommawi = sommewi[l];
-                            if (sommawi < 0.000001){sommawi += 0.000001;}
+                            if (sommawi < 0.000001) {
+                                sigma11[l] = 0.01;
+                                sigma22[l] = 0.01;
+                                sigma12[l] = 0.0;
+                                continue;
+                            }
                             sigma11[l] /= sommawi;
                             sigma22[l] /= sommawi;
                             sigma12[l] /= sommawi;
@@ -4599,11 +4940,16 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         // Delle matrici di covarianze calcoliamo anche le inverse.
                         // Usiamo come sempre la regolarizzazione di Tikhonov.
                         for (int l = 0; l < i; l++) {
-                            const double covarianza = sigma12[l];
+                            const double prodottovarianze = std::sqrt(sigma11[l]*sigma22[l]);
+                            double covarianza = sigma12[l];
+                            if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                                covarianza = std::copysign(prodottovarianze, covarianza);
+                                sigma12[l] = covarianza;
+                            }
                             double determinante = sigma11[l] * sigma22[l] - covarianza * covarianza;
                             if (determinante < 0.000001) {
-                                sigma11[l] += 0.00001;
-                                sigma22[l] += 0.00001;
+                                sigma11[l] += 0.001;
+                                sigma22[l] += 0.001;
                                 determinante = sigma11[l] * sigma22[l] - covarianza * covarianza;
                             }
                             determinanti[l] = determinante;
@@ -4614,35 +4960,40 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         // Adesso calcoliamo il valore attuale della logverosimiglianza.
                         logverosimiglianzeprecedenti = {logverosimiglianzeprecedenti[1], logverosimiglianzacorrente};
                         logverosimiglianzacorrente = 0.0;
+                        std::vector<double> precostanti2(i);
+                        for (int l = 0; l < i; l++) {
+                            precostanti2[l] = std::log(pigreci[l])-logduepigreco-std::log(determinanti[l])/2.0;
+                        }
                         for (int l = 0; l < taglia; l++) {
+                            std::vector<double> esponenti(i);
+                            double esponentemassimo = -std::numeric_limits<double>::infinity();
                             const double ascissa = ascisse[l];
                             const double ordinata = ordinate[l];
-                            long double sommatoria = 0.0;
                             for (int m = 0; m < i; m++) {
                                 const double differenzaascissa = ascissa - muascisse[m];
                                 const double differenzaordinata = ordinata - muordinate[m];
-                                const long double esponenziale =
-                                        -0.5L * inverse11[m] * differenzaascissa * differenzaascissa +
-                                        2.0L * inverse12[m] * differenzaascissa * differenzaordinata
-                                        + inverse22[m] * differenzaordinata * differenzaordinata;
-                                const long double membro = -1.0L / (2.0L * pigreco * std::sqrt(determinanti[m])) *
-                                                      std::exp(esponenziale) * pigreci[m];
-                                sommatoria += membro;
-                                verosimiglianzepigreci[l][m] = membro;
+                                const double esponente = precostanti2[m]-(inverse11[m]*differenzaascissa*differenzaascissa+
+                                    2.0*inverse12[m]*differenzaascissa*differenzaordinata+inverse22[m]*differenzaordinata*
+                                        differenzaordinata)/2.0;
+                                esponenti[m] = esponente;
+                                if (esponente > esponentemassimo){esponentemassimo = esponente;}
                             }
-                            if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                            logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                            logverosimiglianzepigreci[l] = esponenti;
+                            double sommatoria = 0.0;
+                            for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                            logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                         }
                         // Dalla seconda iterazione in poi, utilizziamo l'accelerazione di Aitken
                         // per controllare la convergenza. Se la regola d'arresto |l_\infty-l_{r-1}|<\epsilon
                         // si rivela vera, allora interrompiamo l'algoritmo EM.
                         if (k != 0) {
                             const double precedente = logverosimiglianzeprecedenti[1];
-                            if (precedente-logverosimiglianzeprecedenti[0]){break;}
-                            const double accelerazione = (logverosimiglianzacorrente - precedente) /
-                                                         (precedente - logverosimiglianzeprecedenti[0]);
+                            if (precedente-logverosimiglianzeprecedenti[0] < 0.000001){break;}
+			                double accelerazione = (logverosimiglianzacorrente - precedente) /
+			                    (precedente - logverosimiglianzeprecedenti[0]);
+			                if (accelerazione == 1.0) {accelerazione -= 0.000001;}
                             const double linfinito = precedente + 1 / (1 - accelerazione) *
-                                                     (logverosimiglianzacorrente - precedente);
+                                (logverosimiglianzacorrente - precedente);
                             if (std::abs(linfinito - precedente) < sogliaconvergenza) { break; }
                         }
                     }
@@ -4653,14 +5004,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         // Per prima cosa sfruttiamo le logverosimiglianze calcolate all'iterazione
                         // precedente per trovare i pesi w_{ig}.
                         for (int l = 0; l < taglia; l++) {
-                            std::vector<long double> wi = verosimiglianzepigreci[l];
-                            long double denominatorepesi = 0.0L;
-                            for (int m = 0; m < i; m++) {
-                                denominatorepesi += wi[m];
+                            std::vector<double> wi = logverosimiglianzepigreci[l];
+                            double wimassimo = wi[0];
+                            for (int m = 1; m < i; m++){
+                                if (wi[m] > wimassimo){wimassimo = wi[m];}
                             }
-                            for (int m = 0; m < i; m++) {
-                                if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                                else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                            double sommatoria = 0.0;
+                            for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                            if (sommatoria <= 0.0){
+                                for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                            } else {
+                                for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                             }
                         }
                         // Prima di continuare, prepariamoci calcolando le somme dei w_{ig} per ogni g.
@@ -4692,6 +5046,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                             muascisse[l] = 0.0;
                             muordinate[l] = 0.0;
                             pigreci[l] = sommewi[l] / taglia;
+                            if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                         }
                         std::vector<double> denominatori(i, 0.0);
                         for (int l = 0; l < taglia; l++) {
@@ -4708,7 +5063,14 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         }
                         for (int l = 0; l < i; l++) {
                             double denominatore = denominatori[l];
-                            if (denominatore < 0.000001){denominatore += 0.000001;}
+                            if (denominatore < 0.000001){
+                                muascisse[l] = inizializzatore(generatore);
+                                muordinate[l] = inizializzatore(generatore);
+                                sigma11[l] = 0.0;
+                                sigma22[l] = 0.0;
+                                sigma12[l] = 0.0;
+                                continue;
+                            }
                             muascisse[l] /= denominatore;
                             muordinate[l] /= denominatore;
                             // Riazzeriamo nello stesso ciclo le stime delle matrici di covarianze.
@@ -4732,18 +5094,28 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         }
                         for (int l = 0; l < i; l++) {
                             double sommawi = sommewi[l];
-                            if (sommawi < 0.000001){sommawi += 0.000001;}
+                            if (sommawi < 0.000001) {
+                                sigma11[l] = 0.01;
+                                sigma22[l] = 0.01;
+                                sigma12[l] = 0.0;
+                                continue;
+                            }
                             sigma11[l] /= sommawi;
                             sigma22[l] /= sommawi;
                             sigma12[l] /= sommawi;
                         }
                         // Inoltre calcoliamo le inverse e i determinanti di tali matrici.
                         for (int l = 0; l < i; l++) {
-                            const double covarianza = sigma12[l];
+                            const double prodottovarianze = std::sqrt(sigma11[l]*sigma22[l]);
+                            double covarianza = sigma12[l];
+                            if (covarianza < -prodottovarianze || covarianza > prodottovarianze){
+                                covarianza = std::copysign(prodottovarianze, covarianza);
+                                sigma12[l] = covarianza;
+                            }
                             double determinante = sigma11[l] * sigma22[l] - covarianza * covarianza;
                             if (determinante < 0.000001) {
-                                sigma11[l] += 0.00001;
-                                sigma22[l] += 0.00001;
+                                sigma11[l] += 0.001;
+                                sigma22[l] += 0.001;
                                 determinante = sigma11[l] * sigma22[l] - covarianza * covarianza;
                             }
                             determinanti[l] = determinante;
@@ -4754,10 +5126,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         // Per trovare la stima aggiornata dei gradi di libertà, dobbiamo risolvere (con un metodo
                         // iterativo) l'equazione -\psi(\nu/2)+log(\nu/2)+1+(1/\nu)\sum_iw_{ig}(logu_{ig}-u_{ig})+
                         // \psi((\nu+2)/2)-log((\nu+2)/2)=0. Useremo il metodo di Newton, dunque l'equazione di
-                        // aggiornamento sarà x_t=x_{t-1}-f(x_{t-1})/f'(x_{t-1}). Ricordiamo che la derivata di questa
-                        // funzione è -0.5\psi'(\nu/2)+1/\nu-(1/\nu^2)\sum_iw_{ig}(logy_{ig}-u_{ig})+
-                        // 0.5\psi'((\nu+2)/2)-1/(\nu+2). Per ragioni di velocità, calcoleremo le sommatorie prima
-                        // del resto.
+                        // aggiornamento sarà x_t=x_{t-1}-f(x_{t-1})/f'(x_{t-1}).
                         std::vector<double> sommeru(i, 0.0);
                         for (int l = 0; l < taglia; l++) {
                             const std::vector<double> rigapesi = pesi[l];
@@ -4768,102 +5137,85 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                 sommeru[m] += rigapesi[m] * (std::log(u) - u);
                             }
                         }
-                        for (int l = 0; l < i; l++) {
-                            int grado = nu[l];
-                            if (grado < 1){grado = 1;}
-                            double grado2 = grado / 2.0;
-                            double grado21 = grado2 + 1.0;
-                            const double loggrado2 = std::log(grado2);
-                            const double loggrado21 = std::log(grado21);
-                            const double unosugrado2 = 1.0 / (grado + 2.0);
-                            const double sommaru = sommeru[l];
-                            // Usiamo questo algoritmo per calcolare \psi((\nu+2)/2).
-                            double digamma21 = 0.0;
-                            while (grado21 < 6.0) {
-                                digamma21 -= 1.0 / grado21;
-                                grado21++;
+                        for (int l = 0; l < i; l++){
+                            double grado = nu[l];
+                            if (grado <= 0.0){grado = 0.001;}
+                            const double gradoiniziale = grado;
+                            double grado1 = gradoiniziale/2.0+1.0;
+                            double digamma1 = 0.0;
+                            while (grado1 < 6.0) {
+                                digamma1 -= 1.0/grado1;
+                                grado1++;
                             }
-                            const double xx = 1.0 / grado21;
-                            const double xx2 = xx * xx;
-                            const double xx4 = xx2 * xx2;
-                            digamma21 += std::log(grado21) - xx / 2.0 - xx2 / 12.0 + xx4 / 120.0 - xx4 * xx2 / 252.0;
-                            // Similmente calcoliamo \psi(\nu/2).
-                            double digamma2 = 0.0;
-                            while (grado2 < 6.0) {
-                                digamma2 -= 1.0 / grado2;
-                                grado2++;
+                            const double g2 = grado1*grado1;
+                            const double g4 = g2*g2;
+                            const double g8 = g4*g4;
+                            digamma1 += std::log(grado1)-1.0/(2.0*grado1)-1.0/(12.0*g2)+1.0/(120.0*g4)-1.0/(252.0*g4*g2)+
+                                1.0/(240.0*g8)-1.0/(132.0*g8*g2);
+                            const double costantenumeratore = digamma1+1.0+sommeru[l]/sommewi[l];
+                            for (int m = 0; m < 20; m++) {
+                                double grado2 = grado/2.0;
+                                double digamma2 = 0.0;
+                                double trigamma = 0.0;
+                                while (grado2 < 6.0) {
+                                    digamma2 -= 1.0/grado2;
+                                    trigamma += 1.0/(grado2*grado2);
+                                    grado2++;
+                                }
+                                const double gg2 = grado2*grado2;
+                                const double gg4 = gg2*gg2;
+                                const double gg8 = gg4*gg4;
+                                digamma2 += std::log(grado2)-1.0/(2.0*grado2)-1.0/(12.0*gg2)+1.0/(120.0*gg4)-
+                                    1.0/(252.0*gg4*gg2)+1.0/(240.0*gg8)-1.0/(132.0*gg8*gg2);
+                                trigamma += 1.0/grado2+1.0/(2.0*gg2)+1.0/(6.0*gg2*grado2)-1.0/(30.0*gg4*grado2)+
+                                    1.0/(42.0*gg4*gg2*grado2)-1.0/(30.0*gg8*grado2)+10.0/(132.0*gg8*gg2*grado2);
+                                const double logaritmo = std::log(grado/(gradoiniziale+2.0));
+                                const double reciproco = 1.0/grado;
+                                grado -= (costantenumeratore-digamma2+logaritmo)/(reciproco-0.5*trigamma);
+                                if (grado <= 0.0){grado = 0.001;}
+                                if (grado > 200.0){grado = 200.0;}
                             }
-                            const double xxx = 1.0 / grado2;
-                            const double xxx2 = xxx * xxx;
-                            const double xxx4 = xxx2 * xxx2;
-                            digamma2 += std::log(grado2) - xxx / 2.0 - xxx2 / 12.0 + xxx4 / 120.0 - xxx4 * xxx2 / 252.0;
-                            const double numeratore =
-                                    -digamma2 + loggrado2 + 1.0 + sommaru / grado + digamma21 - loggrado21;
-                            grado2 = grado / 2.0;
-                            // Con quest'altro algoritmo approssimiamo la funzione trigamma, ossia \psi'(\nu/2).
-                            double trigamma2 = 0.0;
-                            while (grado2 < 6.0) {
-                                trigamma2 += 1.0 / (grado2 * grado2);
-                                grado2++;
-                            }
-                            const double xxxx = 1.0 / grado2;
-                            const double xxxx2 = xxxx * xxxx;
-                            trigamma2 += xxxx / 2.0 + xxxx2 / 6.0 - xxxx2 * xxxx2 / 30.0 + xxxx2 * xxxx2 * xxxx2 / 42.0;
-                            // E infine approssimiamo \psi'((\nu+2)/2).
-                            grado21 = grado / 2.0 + 1.0;
-                            double trigamma21 = 0.0;
-                            while (grado21 < 6.0) {
-                                trigamma21 += 1.0 / (grado21 * grado21);
-                                grado21++;
-                            }
-                            const double xxxxx = 1.0 / grado21;
-                            const double xxxxx2 = xxxxx * xxxxx;
-                            trigamma21 += xxxxx / 2.0 + xxxxx2 / 6.0 - xxxxx2 * xxxxx2 / 30.0 + xxxxx2 * xxxxx2 * xxxxx2
-                                    / 42.0;
-                            const double denominatore = -trigamma2 / 2.0 + 1.0 / grado - sommaru / (grado * grado) +
-                                                        trigamma21 / 2.0 - unosugrado2;
-                            if (grado-numeratore/denominatore < 1.0){nu[l] = 1;}
-                            else {nu[l] = static_cast<int>(std::round(grado - numeratore / denominatore));}
+                            nu[l] = grado;
                         }
                         // Ora calcoliamo la logverosimiglianza.
                         logverosimiglianzeprecedenti = {logverosimiglianzeprecedenti[1], logverosimiglianzacorrente};
                         logverosimiglianzacorrente = 0.0;
                         // Iniziamo calcolando le costanti \Gamma((\nu+2)/2)/(\Gamma(\nu/2)\nu\pi).
-                        std::vector<double> precostanti(i);
+                        std::vector<double> precostanti2(i);
                         for (int l = 0; l < i; l++) {
-                            const int grado = nu[l];
-                            precostanti[l] = std::tgamma(grado / 2.0 + 1.0) / (
-                                                 std::tgamma(grado / 2.0) * grado * pigreco);
+                            const double grado = nu[l];
+                            precostanti2[l] = std::log(pigreci[l])+std::lgamma(grado/2.0+1.0)-std::log(grado*pigreco)-
+                                std::log(determinanti[l])/2.0-std::lgamma(grado/2.0);
                         }
                         for (int l = 0; l < taglia; l++) {
+                            std::vector<double> esponenti(i);
+                            double esponentemassimo = -std::numeric_limits<double>::infinity();
                             const double ascissa = ascisse[l];
                             const double ordinata = ordinate[l];
-                            long double sommatoria = 0.0;
                             for (int m = 0; m < i; m++) {
                                 const double differenzaascisse = ascissa - muascisse[m];
                                 const double differenzaordinate = ordinata - muordinate[m];
-                                const int grado = nu[m];
-                                const long double membro = precostanti[m] / std::sqrt(determinanti[m]) * std::pow(1.0L +
-                                                              (inverse11[m] * differenzaascisse * differenzaascisse +
-                                                               2.0L * inverse12[m] *
-                                                               differenzaascisse * differenzaordinate + inverse22[m] *
-                                                               differenzaordinate *
-                                                               differenzaordinate) / grado,
-                                                          -grado / 2.0L - 1.0L) * pigreci[m];
-                                sommatoria += membro;
-                                verosimiglianzepigreci[l][m] = membro;
+                                const double grado = nu[m];
+                                const double esponente = precostanti2[m]-(grado+2.0)/2.0*std::log(1.0+(inverse11[m]*
+                                    differenzaascisse*differenzaascisse+2.0*inverse12[m]*differenzaascisse*differenzaordinate+
+                                        inverse22[m]*differenzaordinate*differenzaordinate)/grado);
+                                esponenti[m] = esponente;
+                                if (esponente > esponentemassimo){esponentemassimo = esponente;}
                             }
-                            if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                            logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                            logverosimiglianzepigreci[l] = esponenti;
+                            double sommatoria = 0.0;
+                            for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                            logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                         }
                         // Dalla seconda iterazione in poi controlliamo la convergenza con l'accelerazione di Aitken.
                         if (k != 0) {
                             const double precedente = logverosimiglianzeprecedenti[1];
                             if (precedente-logverosimiglianzeprecedenti[0] < 0.000001){break;}
-                            const double accelerazione = (logverosimiglianzacorrente - precedente) /
-                                                         (precedente - logverosimiglianzeprecedenti[0]);
+			                double accelerazione = (logverosimiglianzacorrente - precedente) /
+                                (precedente - logverosimiglianzeprecedenti[0]);
+			                if (accelerazione == 1.0) {accelerazione -= 0.000001;}
                             const double linfinito = precedente + 1.0 / (1.0 - accelerazione) *
-                                                     (logverosimiglianzacorrente - precedente);
+                                (logverosimiglianzacorrente - precedente);
                             if (std::abs(linfinito - precedente) < sogliaconvergenza) { break; }
                         }
                     }
@@ -4915,7 +5267,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                 std::vector<double> sigma11vincenti = sigma11;
                 std::vector<double> sigma22vincenti = sigma22;
                 std::vector<double> sigma12vincenti = sigma12;
-                std::vector<int> nuvincenti = nu;
+                std::vector<double> nuvincenti = nu;
                 std::vector<std::vector<double> > pesivincenti(taglia, pigreci);
                 // Se usiamo misture di gaussiane:
                 if (normale) {
@@ -4926,14 +5278,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                             // Ricordiamo che w_{ig}=\pi_gf_g/\sum_g\pi_gf_g. Abbiamo già immagazzinato
                             // le quantità \pi_gf_g in verosimiglianzepigreci,
                             // e "denominatorepesi" sarà la loro somma per i fissato.
-                            std::vector<long double> wi = verosimiglianzepigreci[l];
-                            long double denominatorepesi = 0.0L;
-                            for (int m = 0; m < i; m++) {
-                                denominatorepesi += wi[m];
+                            std::vector<double> wi = logverosimiglianzepigreci[l];
+                            double wimassimo = wi[0];
+                            for (int m = 1; m < i; m++){
+                                if (wi[m] > wimassimo){wimassimo = wi[m];}
                             }
-                            for (int m = 0; m < i; m++) {
-                                if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                                else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                            double sommatoria = 0.0;
+                            for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                            if (sommatoria <= 0.0){
+                                for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                            } else {
+                                for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                             }
                         }
                         // L'algoritmo SEM differisce dall'EM perché una volta calcolati i pesi w_{ig},
@@ -4971,8 +5326,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         }
                         for (int l = 0; l < i; l++) {
                             double sommawi = sommewi[l];
-                            if (sommawi < 0.000001){sommawi += 0.000001;}
+                            if (sommawi < 0.000001){
+                                pigreci[l] = piminimo;
+                                muascisse[l] = inizializzatore(generatore);
+                                muordinate[l] = inizializzatore(generatore);
+                                sigma11[l] = 0.0;
+                                sigma22[l] = 0.0;
+                                sigma12[l] = 0.0;
+                                continue;
+                            }
                             pigreci[l] = sommawi / taglia;
+                            if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                             muascisse[l] /= sommawi;
                             muordinate[l] /= sommawi;
                             // Riazzeriamo nello stesso ciclo le stime delle matrici di covarianze.
@@ -4996,7 +5360,12 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         }
                         for (int l = 0; l < i; l++) {
                             double sommawi = sommewi[l];
-                            if (sommawi < 0.000001){sommawi += 0.000001;}
+                            if (sommawi < 0.000001){
+                                sigma11[l] = 0.01;
+                                sigma22[l] = 0.01;
+                                sigma12[l] = 0.0;
+                                continue;
+                            }
                             sigma11[l] /= sommawi;
                             sigma22[l] /= sommawi;
                             sigma12[l] /= sommawi;
@@ -5004,11 +5373,16 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         // Delle matrici di covarianze calcoliamo anche le inverse.
                         // Usiamo come sempre la regolarizzazione di Tikhonov.
                         for (int l = 0; l < i; l++) {
-                            const double covarianza = sigma12[l];
+                            const double prodottovarianze = std::sqrt(sigma11[l]*sigma22[l]);
+                            double covarianza = sigma12[l];
+                            if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                                covarianza = std::copysign(prodottovarianze, covarianza);
+                                sigma12[l] = covarianza;
+                            }
                             double determinante = sigma11[l] * sigma22[l] - covarianza * covarianza;
                             if (determinante < 0.000001) {
-                                sigma11[l] += 0.00001;
-                                sigma22[l] += 0.00001;
+                                sigma11[l] += 0.001;
+                                sigma22[l] += 0.001;
                                 determinante = sigma11[l] * sigma22[l] - covarianza * covarianza;
                             }
                             determinanti[l] = determinante;
@@ -5019,24 +5393,28 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         // Se abbiamo passato un quarto delle iterazioni, dopo aver calcolato il valore della
                         // logverosimiglianza vediamo se abbiamo superato il record precedente.
                         logverosimiglianzacorrente = 0.0;
+                        std::vector<double> precostanti2(i);
+                        for (int l = 0; l < i; l++){
+                            precostanti2[l] = std::log(pigreci[l])-logduepigreco-std::log(determinanti[l])/2.0;
+                        }
                         for (int l = 0; l < taglia; l++) {
+                            std::vector<double> esponenti(i);
+                            double esponentemassimo = -std::numeric_limits<double>::infinity();
                             const double ascissa = ascisse[l];
                             const double ordinata = ordinate[l];
-                            long double sommatoria = 0.0;
                             for (int m = 0; m < i; m++) {
                                 const double differenzaascissa = ascissa - muascisse[m];
                                 const double differenzaordinata = ordinata - muordinate[m];
-                                const long double esponenziale =
-                                        -0.5L * inverse11[m] * differenzaascissa * differenzaascissa +
-                                        2.0L * inverse12[m] * differenzaascissa * differenzaordinata
-                                        + inverse22[m] * differenzaordinata * differenzaordinata;
-                                const long double membro = -1.0L / (2.0L * pigreco * std::sqrt(determinanti[m])) *
-                                                      std::exp(esponenziale) * pigreci[m];
-                                sommatoria += membro;
-                                verosimiglianzepigreci[l][m] = membro;
+                                const double esponente = precostanti2[m]-(inverse11[m]*differenzaascissa*differenzaascissa+
+                                    2.0*inverse12[m]*differenzaascissa*differenzaordinata+inverse22[m]*differenzaordinata*
+                                        differenzaordinata)/2.0;
+                                esponenti[m] = esponente;
+                                if (esponente > esponentemassimo){esponentemassimo = esponente;}
                             }
-                            if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                            logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                            logverosimiglianzepigreci[l] = esponenti;
+                            double sommatoria = 0.0;
+                            for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                            logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                         }
                         if (k > sogliacontrollo && logverosimiglianzacorrente > logverosimiglianzavincente) {
                             logverosimiglianzavincente = logverosimiglianzacorrente;
@@ -5060,14 +5438,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         // Per prima cosa sfruttiamo le logverosimiglianze calcolate all'iterazione
                         // precedente per trovare i pesi w_{ig}.
                         for (int l = 0; l < taglia; l++) {
-                            std::vector<long double> wi = verosimiglianzepigreci[l];
-                            long double denominatorepesi = 0.0L;
-                            for (int m = 0; m < i; m++) {
-                                denominatorepesi += wi[m];
+                            std::vector<double> wi = logverosimiglianzepigreci[l];
+                            double wimassimo = wi[0];
+                            for (int m = 1; m < i; m++) {
+                                if (wi[m] > wimassimo){wimassimo = wi[m];}
                             }
-                            for (int m = 0; m < i; m++) {
-                                if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                                else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                            double sommatoria = 0.0;
+                            for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                            if (sommatoria <= 0.0) {
+                                for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                            } else {
+                                for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                             }
                         }
                         // L'algoritmo SEM differisce dall'EM perché una volta calcolati i pesi w_{ig},
@@ -5110,6 +5491,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                             muascisse[l] = 0.0;
                             muordinate[l] = 0.0;
                             pigreci[l] = sommewi[l] / taglia;
+                            if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                         }
                         std::vector<double> denominatori(i, 0.0);
                         for (int l = 0; l < taglia; l++) {
@@ -5126,7 +5508,14 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         }
                         for (int l = 0; l < i; l++) {
                             double denominatore = denominatori[l];
-                            if (denominatore < 0.000001){denominatore += 0.000001;}
+                            if (denominatore < 0.000001){
+                                muascisse[l] = inizializzatore(generatore);
+                                muordinate[l] = inizializzatore(generatore);
+                                sigma11[l] = 0.0;
+                                sigma22[l] = 0.0;
+                                sigma12[l] = 0.0;
+                                continue;
+                            }
                             muascisse[l] /= denominatore;
                             muordinate[l] /= denominatore;
                             // Riazzeriamo nello stesso ciclo le stime delle matrici di covarianze.
@@ -5150,18 +5539,28 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         }
                         for (int l = 0; l < i; l++) {
                             double sommawi = sommewi[l];
-                            if (sommawi < 0.000001){sommawi += 0.000001;}
+                            if (sommawi < 0.000001){
+                                sigma11[l] = 0.01;
+                                sigma22[l] = 0.01;
+                                sigma12[l] = 0.0;
+                                continue;
+                            }
                             sigma11[l] /= sommawi;
                             sigma22[l] /= sommawi;
                             sigma12[l] /= sommawi;
                         }
                         // Inoltre calcoliamo le inverse e i determinanti di tali matrici.
                         for (int l = 0; l < i; l++) {
-                            const double covarianza = sigma12[l];
+                            const double prodottovarianze = std::sqrt(sigma11[l]*sigma22[l]);
+                            double covarianza = sigma12[l];
+                            if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                                covarianza = std::copysign(prodottovarianze, covarianza);
+                                sigma12[l] = covarianza;
+                            }
                             double determinante = sigma11[l] * sigma22[l] - covarianza * covarianza;
                             if (determinante < 0.000001) {
-                                sigma11[l] += 0.00001;
-                                sigma22[l] += 0.00001;
+                                sigma11[l] += 0.001;
+                                sigma22[l] += 0.001;
                                 determinante = sigma11[l] * sigma22[l] - covarianza * covarianza;
                             }
                             determinanti[l] = determinante;
@@ -5172,10 +5571,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         // Per trovare la stima aggiornata dei gradi di libertà, dobbiamo risolvere (con un metodo
                         // iterativo) l'equazione -\psi(\nu/2)+log(\nu/2)+1+(1/\nu)\sum_iw_{ig}(logu_{ig}-u_{ig})+
                         // \psi((\nu+2)/2)-log((\nu+2)/2)=0. Useremo il metodo di Newton, dunque l'equazione di
-                        // aggiornamento sarà x_t=x_{t-1}-f(x_{t-1})/f'(x_{t-1}). Ricordiamo che la derivata di questa
-                        // funzione è -0.5\psi'(\nu/2)+1/\nu-(1/\nu^2)\sum_iw_{ig}(logy_{ig}-u_{ig})+
-                        // 0.5\psi'((\nu+2)/2)-1/(\nu+2). Per ragioni di velocità, calcoleremo le sommatorie prima
-                        // del resto.
+                        // aggiornamento sarà x_t=x_{t-1}-f(x_{t-1})/f'(x_{t-1}).
                         std::vector<double> sommeru(i, 0.0);
                         for (int l = 0; l < taglia; l++) {
                             const std::vector<double> rigapseudi = pseudi[l];
@@ -5185,91 +5581,73 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                 sommeru[m] += rigapseudi[m] * (std::log(u) - u);
                             }
                         }
-                        for (int l = 0; l < i; l++) {
-                            int grado = nu[l];
-                            if (grado < 1){grado = 1;}
-                            double grado2 = grado / 2.0;
-                            double grado21 = grado2 + 1.0;
-                            const double loggrado2 = std::log(grado2);
-                            const double loggrado21 = std::log(grado21);
-                            const double unosugrado2 = 1.0 / (grado + 2.0);
-                            const double sommaru = sommeru[l];
-                            // Usiamo questo algoritmo per calcolare \psi((\nu+2)/2).
-                            double digamma21 = 0.0;
-                            while (grado21 < 6.0) {
-                                digamma21 -= 1.0 / grado21;
-                                grado21++;
+                        for (int l = 0; l < i; l++){
+                            double grado = nu[l];
+                            if (grado <= 0.0){grado = 0.001;}
+                            const double gradoiniziale = grado;
+                            double grado1 = gradoiniziale/2.0+1.0;
+                            double digamma1 = 0.0;
+                            while (grado1 < 6.0) {
+                                digamma1 -= 1.0/grado1;
+                                grado1++;
                             }
-                            const double xx = 1.0 / grado21;
-                            const double xx2 = xx * xx;
-                            const double xx4 = xx2 * xx2;
-                            digamma21 += std::log(grado21) - xx / 2.0 - xx2 / 12.0 + xx4 / 120.0 - xx4 * xx2 / 252.0;
-                            // Similmente calcoliamo \psi(\nu/2).
-                            double digamma2 = 0.0;
-                            while (grado2 < 6.0) {
-                                digamma2 -= 1.0 / grado2;
-                                grado2++;
+                            const double g2 = grado1*grado1;
+                            const double g4 = g2*g2;
+                            const double g8 = g4*g4;
+                            digamma1 += std::log(grado1)-1.0/(2.0*grado1)-1.0/(12.0*g2)+1.0/(120.0*g4)-1.0/(252.0*g4*g2)+
+                                1.0/(240.0*g8)-1.0/(132.0*g8*g2);
+                            const double costantenumeratore = digamma1+1.0+sommeru[l]/sommewi[l];
+                            for (int m = 0; m < 20; m++) {
+                                double grado2 = grado/2.0;
+                                double digamma2 = 0.0;
+                                double trigamma = 0.0;
+                                while (grado2 < 6.0) {
+                                    digamma2 -= 1.0/grado2;
+                                    trigamma += 1.0/(grado2*grado2);
+                                    grado2++;
+                                }
+                                const double gg2 = grado2*grado2;
+                                const double gg4 = gg2*gg2;
+                                const double gg8 = gg4*gg4;
+                                digamma2 += std::log(grado2)-1.0/(2.0*grado2)-1.0/(12.0*gg2)+1.0/(120.0*gg4)-
+                                    1.0/(252.0*gg4*gg2)+1.0/(240.0*gg8)-1.0/(132.0*gg8*gg2);
+                                trigamma += 1.0/grado2+1.0/(2.0*gg2)+1.0/(6.0*gg2*grado2)-1.0/(30.0*gg4*grado2)+
+                                    1.0/(42.0*gg4*gg2*grado2)-1.0/(30.0*gg8*grado2)+10.0/(132.0*gg8*gg2*grado2);
+                                const double logaritmo = std::log(grado/(gradoiniziale+2.0));
+                                const double reciproco = 1.0/grado;
+                                grado -= (costantenumeratore-digamma2+logaritmo)/(reciproco-0.5*trigamma);
+                                if (grado <= 0.0){grado = 0.001;}
+                                if (grado > 200.0){grado = 200.0;}
                             }
-                            const double xxx = 1.0 / grado2;
-                            const double xxx2 = xxx * xxx;
-                            const double xxx4 = xxx2 * xxx2;
-                            digamma2 += std::log(grado2) - xxx / 2.0 - xxx2 / 12.0 + xxx4 / 120.0 - xxx4 * xxx2 / 252.0;
-                            const double numeratore =
-                                    -digamma2 + loggrado2 + 1.0 + sommaru / grado + digamma21 - loggrado21;
-                            grado2 = grado / 2.0;
-                            // Con quest'altro algoritmo approssimiamo la funzione trigamma, ossia \psi'(\nu/2).
-                            double trigamma2 = 0.0;
-                            while (grado2 < 6.0) {
-                                trigamma2 += 1.0 / (grado2 * grado2);
-                                grado2++;
-                            }
-                            const double xxxx = 1.0 / grado2;
-                            const double xxxx2 = xxxx * xxxx;
-                            trigamma2 += xxxx / 2.0 + xxxx2 / 6.0 - xxxx2 * xxxx2 / 30.0 + xxxx2 * xxxx2 * xxxx2 / 42.0;
-                            // E infine approssimiamo \psi'((\nu+2)/2).
-                            grado21 = grado / 2.0 + 1.0;
-                            double trigamma21 = 0.0;
-                            while (grado21 < 6.0) {
-                                trigamma21 += 1.0 / (grado21 * grado21);
-                                grado21++;
-                            }
-                            const double xxxxx = 1.0 / grado21;
-                            const double xxxxx2 = xxxxx * xxxxx;
-                            trigamma21 += xxxxx / 2.0 + xxxxx2 / 6.0 - xxxxx2 * xxxxx2 / 30.0 + xxxxx2 * xxxxx2 * xxxxx2
-                                    / 42.0;
-                            const double denominatore = -trigamma2 / 2.0 + 1.0 / grado - sommaru / (grado * grado) +
-                                                        trigamma21 / 2.0 - unosugrado2;
-                            if (grado-numeratore/denominatore < 1.0){nu[l] = 1;}
-                            else {nu[l] = static_cast<int>(std::round(grado - numeratore / denominatore));}
+                            nu[l] = grado;
                         }
                         logverosimiglianzacorrente = 0.0;
                         // Iniziamo calcolando le costanti \Gamma((\nu+2)/2)/(\Gamma(\nu/2)\nu\pi).
-                        std::vector<double> precostanti(i);
+                        std::vector<double> precostanti2(i);
                         for (int l = 0; l < i; l++) {
-                            const int grado = nu[l];
-                            precostanti[l] = std::tgamma(grado / 2.0 + 1.0) / (
-                                                 std::tgamma(grado / 2.0) * grado * pigreco);
+                            const double grado = nu[l];
+                            precostanti2[l] = std::log(pigreci[l])+std::lgamma(grado/2.0+1.0)-std::log(grado*pigreco)-
+                                std::log(determinanti[l])/2.0-std::lgamma(grado/2.0);
                         }
                         for (int l = 0; l < taglia; l++) {
+                            std::vector<double> esponenti(i);
+                            double esponentemassimo = -std::numeric_limits<double>::infinity();
                             const double ascissa = ascisse[l];
                             const double ordinata = ordinate[l];
-                            long double sommatoria = 0.0;
                             for (int m = 0; m < i; m++) {
                                 const double differenzaascisse = ascissa - muascisse[m];
                                 const double differenzaordinate = ordinata - muordinate[m];
-                                const int grado = nu[m];
-                                const long double membro = precostanti[m] / std::sqrt(determinanti[m]) * std::pow(1.0L +
-                                                              (inverse11[m] * differenzaascisse * differenzaascisse +
-                                                               2.0L * inverse12[m] *
-                                                               differenzaascisse * differenzaordinate + inverse22[m] *
-                                                               differenzaordinate *
-                                                               differenzaordinate) / grado,
-                                                          -grado / 2.0L - 1.0L) * pigreci[m];
-                                sommatoria += membro;
-                                verosimiglianzepigreci[l][m] = membro;
+                                const double grado = nu[m];
+                                const double esponente = precostanti2[m]-(grado+2.0)/2.0*std::log(1.0+(inverse11[m]*
+                                    differenzaascisse*differenzaascisse+2.0*inverse12[m]*differenzaascisse*differenzaordinate+
+                                        inverse22[m]*differenzaordinate*differenzaordinate)/grado);
+                                esponenti[m] = esponente;
+                                if (esponente > esponentemassimo){esponentemassimo = esponente;}
                             }
-                            if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                            logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                            logverosimiglianzepigreci[l] = esponenti;
+                            double sommatoria = 0.0;
+                            for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                            logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                         }
                         // Se siamo a oltre un quarto delle iterazioni, dopo aver calcolato il valore della
                         // logverosimiglianza vediamo se supera il record attuale.
@@ -5331,14 +5709,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         // Per prima cosa sfruttiamo le logverosimiglianze calcolate all'iterazione
                         // precedente per trovare i pesi w_{ig}.
                         for (int l = 0; l < taglia; l++) {
-                            std::vector<long double> wi = verosimiglianzepigreci[l];
-                            long double denominatorepesi = 0.0L;
-                            for (int m = 0; m < i; m++) {
-                                denominatorepesi += wi[m];
+                            std::vector<double> wi = logverosimiglianzepigreci[l];
+                            double wimassimo = wi[0];
+                            for (int m = 1; m < i; m++){
+                                if (wi[m] > wimassimo){wimassimo = wi[m];}
                             }
-                            for (int m = 0; m < i; m++) {
-                                if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                                else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                            double sommatoria = 0.0;
+                            for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                            if (sommatoria <= 0.0){
+                                for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                            } else {
+                                for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                             }
                         }
                         // La differenza dell'algoritmo CEM rispetto all'EM è che dopo aver aggiornato
@@ -5358,8 +5739,9 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                     clusterunita = m;
                                 }
                             }
-                            ascissepartizione[clusterunita].push_back(ascisse[l]);
-                            ordinatepartizione[clusterunita].push_back(ordinate[l]);
+                            const int indice = tagliepartizione[clusterunita];
+                            ascissepartizione[clusterunita][indice] = ascisse[l];
+                            ordinatepartizione[clusterunita][indice] = ordinate[l];
                             tagliepartizione[clusterunita]++;
                         }
                         // Per aggiornare le stime dei parametri, nel caso del CEM, non è necessario
@@ -5368,7 +5750,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         // Ora aggiorniamo la stima dei parametri.
                         for (int l = 0; l < i; l++) {
                             const int tagliapartizione = tagliepartizione[l];
-                            if (tagliapartizione != 0) {
+                            if (tagliapartizione > 1) {
                                 const std::vector<double> ascissecorrenti = ascissepartizione[l];
                                 const std::vector<double> ordinatecorrenti = ordinatepartizione[l];
                                 double mediaascissecorrente = 0.0;
@@ -5378,6 +5760,7 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                     mediaordinatecorrente += ordinatecorrenti[m];
                                 }
                                 pigreci[l] = static_cast<double>(tagliapartizione) / taglia;
+                                if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
                                 mediaascissecorrente /= tagliapartizione;
                                 mediaordinatecorrente /= tagliapartizione;
                                 muascisse[l] = mediaascissecorrente;
@@ -5397,10 +5780,14 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                     varianzaordinate /= tagliapartizione;
                                     covarianza /= tagliapartizione;
                                 }
+                                const double prodottovarianze = std::sqrt(varianzaascisse*varianzaordinate);
+                                if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                                    covarianza = std::copysign(prodottovarianze, covarianza);
+                                }
                                 double determinante = varianzaascisse * varianzaordinate - covarianza * covarianza;
                                 if (determinante < 0.000001) {
-                                    varianzaascisse += 0.00001;
-                                    varianzaordinate += 0.00001;
+                                    varianzaascisse += 0.001;
+                                    varianzaordinate += 0.001;
                                     determinante = varianzaascisse * varianzaordinate - covarianza * covarianza;
                                 }
                                 inverse11[l] = varianzaordinate / determinante;
@@ -5409,29 +5796,45 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                 sigma11[l] = varianzaascisse;
                                 sigma22[l] = varianzaordinate;
                                 sigma12[l] = covarianza;
-                            } else { pigreci[l] = 0.0; }
+                                determinanti[l] = determinante;
+                            } else {
+                                pigreci[l] = piminimo;
+                                muascisse[l] = inizializzatore(generatore);
+                                muordinate[l] = inizializzatore(generatore);
+                                sigma11[l] = 0.01;
+                                sigma22[l] = 0.01;
+                                sigma12[l] = 0.0;
+                                inverse11[l] = 100.0;
+                                inverse22[l] = 100.0;
+                                inverse12[l] = 0.0;
+                                determinanti[l] = 0.0001;
+                            }
                         }
                         // Adesso calcoliamo il valore attuale della logverosimiglianza.
                         logverosimiglianzeprecedenti = {logverosimiglianzeprecedenti[1], logverosimiglianzacorrente};
                         logverosimiglianzacorrente = 0.0;
+                        std::vector<double> precostanti2(i);
+                        for (int l = 0; l < i; l++){
+                            precostanti2[l] = std::log(pigreci[l])-logduepigreco-std::log(determinanti[l])/2.0;
+                        }
                         for (int l = 0; l < taglia; l++) {
+                            std::vector<double> esponenti(i);
+                            double esponentemassimo = -std::numeric_limits<double>::infinity();
                             const double ascissa = ascisse[l];
                             const double ordinata = ordinate[l];
-                            long double sommatoria = 0.0L;
                             for (int m = 0; m < i; m++) {
                                 const double differenzaascissa = ascissa - muascisse[m];
                                 const double differenzaordinata = ordinata - muordinate[m];
-                                const long double esponenziale =
-                                        -0.5L * inverse11[m] * differenzaascissa * differenzaascissa +
-                                        2.0L * inverse12[m] * differenzaascissa * differenzaordinata
-                                        + inverse22[m] * differenzaordinata * differenzaordinata;
-                                const long double membro = -1.0L / (2.0L * pigreco * std::sqrt(determinanti[m])) *
-                                                      std::exp(esponenziale) * pigreci[m];
-                                sommatoria += membro;
-                                verosimiglianzepigreci[l][m] = membro;
+                                const double esponente = precostanti2[m]-(inverse11[m]*differenzaascissa*differenzaascissa+
+                                    2.0*inverse12[m]*differenzaascissa*differenzaordinata+inverse22[m]*differenzaordinata*
+                                        differenzaordinata)/2.0;
+                                esponenti[m] = esponente;
+                                if (esponente > esponentemassimo){esponentemassimo = esponente;}
                             }
-                            if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                            logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                            logverosimiglianzepigreci[l] = esponenti;
+                            double sommatoria = 0.0;
+                            for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                            logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                         }
                         // Dalla seconda iterazione in poi, utilizziamo l'accelerazione di Aitken
                         // per controllare la convergenza. Se la regola d'arresto |l_\infty-l_{r-1}|<\epsilon
@@ -5439,10 +5842,11 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         if (k != 0) {
                             const double precedente = logverosimiglianzeprecedenti[1];
                             if (precedente-logverosimiglianzeprecedenti[0] < 0.000001){break;}
-                            const double accelerazione = (logverosimiglianzacorrente - precedente) /
-                                                         (precedente - logverosimiglianzeprecedenti[0]);
+			                double accelerazione = (logverosimiglianzacorrente - precedente) /
+			                    (precedente - logverosimiglianzeprecedenti[0]);
+			                if (accelerazione == 1.0) {accelerazione -= 0.000001;}
                             const double linfinito = precedente + 1.0 / (1.0 - accelerazione) *
-                                                     (logverosimiglianzacorrente - precedente);
+                                (logverosimiglianzacorrente - precedente);
                             if (std::abs(linfinito - precedente) < sogliaconvergenza) { break; }
                         }
                     }
@@ -5452,14 +5856,17 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                         // Per prima cosa sfruttiamo le logverosimiglianze calcolate all'iterazione
                         // precedente per trovare i pesi w_{ig}.
                         for (int l = 0; l < taglia; l++) {
-                            std::vector<long double> wi = verosimiglianzepigreci[l];
-                            long double denominatorepesi = 0.0L;
-                            for (int m = 0; m < i; m++) {
-                                denominatorepesi += wi[m];
+                            std::vector<double> wi = logverosimiglianzepigreci[l];
+                            double wimassimo = wi[0];
+                            for (int m = 1; m < i; m++) {
+                                if (wi[m] > wimassimo){wimassimo = wi[m];}
                             }
-                            for (int m = 0; m < i; m++) {
-                                if (denominatorepesi < 1e-300L){pesi[l][m] = 1.0/i;}
-                                else {pesi[l][m] = static_cast<double>(wi[m] / denominatorepesi);}
+                            double sommatoria = 0.0;
+                            for (int m = 0; m < i; m++){sommatoria += std::exp(wi[m]-wimassimo);}
+                            if (sommatoria <= 0.0) {
+                                for (int m = 0; m < i; m++){pesi[l][m] = 1.0/i;}
+                            } else {
+                                for (int m = 0; m < i; m++){pesi[l][m] = std::exp(wi[m]-wimassimo-std::log(sommatoria));}
                             }
                         }
                         // Adesso calcoliamo anche i pesi u_{ig}, che ricordiamo essere
@@ -5497,9 +5904,10 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                     clusterunita = m;
                                 }
                             }
-                            ascissepartizione[clusterunita].push_back(ascisse[l]);
-                            ordinatepartizione[clusterunita].push_back(ordinate[l]);
-                            upartizione[clusterunita].push_back(uig[l][clusterunita]);
+                            const int indice = tagliepartizione[clusterunita];
+                            ascissepartizione[clusterunita][indice] = ascisse[l];
+                            ordinatepartizione[clusterunita][indice] = ordinate[l];
+                            upartizione[clusterunita][indice] = uig[l][clusterunita];
                             tagliepartizione[clusterunita]++;
                         }
                         // Ora aggiorniamo la stima dei parametri.
@@ -5519,144 +5927,150 @@ void veroclustering(const bool normale, const int i, const int iterazioniinizial
                                     denominatore += u;
                                 }
                                 pigreci[l] = static_cast<double>(tagliapartizione) / taglia;
-                                if (denominatore < 0.000001){denominatore += 0.000001;}
-                                mediaascissecorrente /= denominatore;
-                                mediaordinatecorrente /= denominatore;
-                                muascisse[l] = mediaascissecorrente;
-                                muordinate[l] = mediaordinatecorrente;
-                                double varianzaascisse = 0.0;
-                                double varianzaordinate = 0.0;
-                                double covarianza = 0.0;
-                                for (int m = 0; m < tagliapartizione; m++) {
-                                    const double u = ucorrenti[m];
-                                    const double differenzaascisse = ascissecorrenti[m] - mediaascissecorrente;
-                                    const double differenzaordinate = ordinatecorrenti[m] - mediaordinatecorrente;
-                                    varianzaascisse += u * differenzaascisse * differenzaascisse;
-                                    varianzaordinate += u * differenzaordinate * differenzaordinate;
-                                    covarianza += u * differenzaascisse * differenzaordinate;
-                                }
-                                if (tagliapartizione != 1) {
+                                if (pigreci[l] < piminimo){pigreci[l] = piminimo;}
+                                if (denominatore >= 0.000001 && tagliapartizione != 1){
+                                    mediaascissecorrente /= denominatore;
+                                    mediaordinatecorrente /= denominatore;
+                                    muascisse[l] = mediaascissecorrente;
+                                    muordinate[l] = mediaordinatecorrente;
+                                    double varianzaascisse = 0.0;
+                                    double varianzaordinate = 0.0;
+                                    double covarianza = 0.0;
+                                    for (int m = 0; m < tagliapartizione; m++) {
+                                        const double u = ucorrenti[m];
+                                        const double differenzaascisse = ascissecorrenti[m] - mediaascissecorrente;
+                                        const double differenzaordinate = ordinatecorrenti[m] - mediaordinatecorrente;
+                                        varianzaascisse += u * differenzaascisse * differenzaascisse;
+                                        varianzaordinate += u * differenzaordinate * differenzaordinate;
+                                        covarianza += u * differenzaascisse * differenzaordinate;
+                                    }
                                     varianzaascisse /= tagliapartizione;
                                     varianzaordinate /= tagliapartizione;
                                     covarianza /= tagliapartizione;
+                                    const double prodottovarianze = std::sqrt(varianzaascisse*varianzaordinate);
+                                    if (covarianza < -prodottovarianze || covarianza > prodottovarianze) {
+                                        covarianza = std::copysign(prodottovarianze, covarianza);
+                                    }
+                                    double determinante = varianzaascisse * varianzaordinate - covarianza * covarianza;
+                                    if (determinante < 0.000001) {
+                                        varianzaascisse += 0.001;
+                                        varianzaordinate += 0.001;
+                                        determinante = varianzaascisse * varianzaordinate - covarianza * covarianza;
+                                    }
+                                    inverse11[l] = varianzaordinate / determinante;
+                                    inverse22[l] = varianzaascisse / determinante;
+                                    inverse12[l] = -covarianza / determinante;
+                                    sigma11[l] = varianzaascisse;
+                                    sigma22[l] = varianzaordinate;
+                                    sigma12[l] = covarianza;
+                                    determinanti[l] = determinante;
+                                } else {
+                                    pigreci[l] = piminimo;
+                                    muascisse[l] = inizializzatore(generatore);
+                                    muordinate[l] = inizializzatore(generatore);
+                                    sigma11[l] = 0.01;
+                                    sigma22[l] = 0.01;
+                                    sigma12[l] = 0.0;
+                                    inverse11[l] = 100.0;
+                                    inverse22[l] = 100.0;
+                                    inverse12[l] = 0.0;
+                                    determinanti[l] = 0.0001;
                                 }
-                                double determinante = varianzaascisse * varianzaordinate - covarianza * covarianza;
-                                if (determinante < 0.000001) {
-                                    varianzaascisse += 0.00001;
-                                    varianzaordinate += 0.00001;
-                                    determinante = varianzaascisse * varianzaordinate - covarianza * covarianza;
+                                double grado = nu[l];
+                                if (grado <= 0.0){grado = 0.001;}
+                                const double gradoiniziale = grado;
+                                double grado1 = gradoiniziale/2.0+1.0;
+                                double digamma1 = 0.0;
+                                while (grado1 < 6.0) {
+                                    digamma1 -= 1.0/grado1;
+                                    grado1++;
                                 }
-                                inverse11[l] = varianzaordinate / determinante;
-                                inverse22[l] = varianzaascisse / determinante;
-                                inverse12[l] = -covarianza / determinante;
-                                sigma11[l] = varianzaascisse;
-                                sigma22[l] = varianzaordinate;
-                                sigma12[l] = covarianza;
-                                int grado = nu[l];
-                                if (grado < 1){grado = 1;}
-                                double grado2 = grado / 2.0;
-                                double grado21 = grado2 + 1.0;
-                                const double loggrado2 = std::log(grado2);
-                                const double loggrado21 = std::log(grado21);
-                                const double unosugrado2 = 1.0 / (grado + 2.0);
+                                const double g2 = grado1*grado1;
+                                const double g4 = g2*g2;
+                                const double g8 = g4*g4;
+                                digamma1 += std::log(grado1)-1.0/(2.0*grado1)-1.0/(12.0*g2)+1.0/(120.0*g4)-1.0/(252.0*g4*g2)+
+                                    1.0/(240.0*g8)-1.0/(132.0*g8*g2);
                                 double sommaru = 0.0;
                                 for (int m = 0; m < tagliapartizione; m++) {
                                     double u = ucorrenti[m];
                                     if (u < 0.000001){u += 0.000001;}
-                                    sommaru += std::log(u) - u;
+                                    sommaru += std::log(u)-u;
                                 }
-                                // Usiamo questo algoritmo per calcolare \psi((\nu+2)/2).
-                                double digamma21 = 0.0;
-                                while (grado21 < 6.0) {
-                                    digamma21 -= 1.0 / grado21;
-                                    grado21++;
+                                const double costantenumeratore = digamma1+1.0+sommaru/tagliapartizione;
+                                for (int m = 0; m < 20; m++) {
+                                    double grado2 = grado/2.0;
+                                    double digamma2 = 0.0;
+                                    double trigamma = 0.0;
+                                    while (grado2 < 6.0) {
+                                        digamma2 -= 1.0/grado2;
+                                        trigamma += 1.0/(grado2*grado2);
+                                        grado2++;
+                                    }
+                                    const double gg2 = grado2*grado2;
+                                    const double gg4 = gg2*gg2;
+                                    const double gg8 = gg4*gg4;
+                                    digamma2 += std::log(grado2)-1.0/(2.0*grado2)-1.0/(12.0*gg2)+1.0/(120.0*gg4)-
+                                        1.0/(252.0*gg4*gg2)+1.0/(240.0*gg8)-1.0/(132.0*gg8*gg2);
+                                    trigamma += 1.0/grado2+1.0/(2.0*gg2)+1.0/(6.0*gg2*grado2)-1.0/(30.0*gg4*grado2)+
+                                        1.0/(42.0*gg4*gg2*grado2)-1.0/(30.0*gg8*grado2)+10.0/(132.0*gg8*gg2*grado2);
+                                    const double logaritmo = std::log(grado/(gradoiniziale+2.0));
+                                    const double reciproco = 1.0/grado;
+                                    grado -= (costantenumeratore-digamma2+logaritmo)/(reciproco-0.5*trigamma);
+                                    if (grado <= 0.0){grado = 0.001;}
+                                    if (grado > 200.0){grado = 200.0;}
                                 }
-                                const double xx = 1.0 / grado21;
-                                const double xx2 = xx * xx;
-                                const double xx4 = xx2 * xx2;
-                                digamma21 += std::log(grado21) - xx / 2.0 - xx2 / 12.0 + xx4 / 120.0 - xx4 * xx2 /
-                                        252.0;
-                                // Similmente calcoliamo \psi(\nu/2).
-                                double digamma2 = 0.0;
-                                while (grado2 < 6.0) {
-                                    digamma2 -= 1.0 / grado2;
-                                    grado2++;
-                                }
-                                const double xxx = 1.0 / grado2;
-                                const double xxx2 = xxx * xxx;
-                                const double xxx4 = xxx2 * xxx2;
-                                digamma2 += std::log(grado2) - xxx / 2.0 - xxx2 / 12.0 + xxx4 / 120.0 - xxx4 * xxx2 /
-                                        252.0;
-                                const double numeratore =
-                                        -digamma2 + loggrado2 + 1.0 + sommaru / grado + digamma21 - loggrado21;
-                                grado2 = grado / 2.0;
-                                // Con quest'altro algoritmo approssimiamo la funzione trigamma, ossia \psi'(\nu/2).
-                                double trigamma2 = 0.0;
-                                while (grado2 < 6.0) {
-                                    trigamma2 += 1.0 / (grado2 * grado2);
-                                    grado2++;
-                                }
-                                const double xxxx = 1.0 / grado2;
-                                const double xxxx2 = xxxx * xxxx;
-                                trigamma2 += xxxx / 2.0 + xxxx2 / 6.0 - xxxx2 * xxxx2 / 30.0 + xxxx2 * xxxx2 * xxxx2 /
-                                        42.0;
-                                // E infine approssimiamo \psi'((\nu+2)/2).
-                                grado21 = grado / 2.0 + 1.0;
-                                double trigamma21 = 0.0;
-                                while (grado21 < 6.0) {
-                                    trigamma21 += 1.0 / (grado21 * grado21);
-                                    grado21++;
-                                }
-                                const double xxxxx = 1.0 / grado21;
-                                const double xxxxx2 = xxxxx * xxxxx;
-                                trigamma21 += xxxxx / 2.0 + xxxxx2 / 6.0 - xxxxx2 * xxxxx2 / 30.0 + xxxxx2 * xxxxx2 *
-                                        xxxxx2 / 42.0;
-                                const double denominatore2 =
-                                        -trigamma2 / 2.0 + 1.0 / grado - sommaru / (grado * grado) +
-                                        trigamma21 / 2.0 - unosugrado2;
-                                if (grado-numeratore/denominatore2 < 1.0){nu[l] = 1;}
-                                else {nu[l] = static_cast<int>(std::round(grado - numeratore / denominatore2));}
-                            } else { pigreci[l] = 0.0; }
+                                nu[l] = grado;
+                            } else {
+                                pigreci[l] = piminimo;
+                                muascisse[l] = inizializzatore(generatore);
+                                muordinate[l] = inizializzatore(generatore);
+                                sigma11[l] = 0.01;
+                                sigma22[l] = 0.01;
+                                sigma12[l] = 0.0;
+                                inverse11[l] = 100.0;
+                                inverse22[l] = 100.0;
+                                inverse12[l] = 0.0;
+                            }
                         }
                         // Ora calcoliamo la logverosimiglianza.
                         logverosimiglianzeprecedenti = {logverosimiglianzeprecedenti[1], logverosimiglianzacorrente};
                         logverosimiglianzacorrente = 0.0;
                         // Iniziamo calcolando le costanti \Gamma((\nu+2)/2)/(\Gamma(\nu/2)\nu\pi).
-                        std::vector<double> precostanti(i);
+                        std::vector<double> precostanti2(i);
                         for (int l = 0; l < i; l++) {
-                            const int grado = nu[l];
-                            precostanti[l] = std::tgamma(grado / 2.0 + 1.0) / (
-                                                 std::tgamma(grado / 2.0) * grado * pigreco);
+                            const double grado = nu[l];
+                            precostanti2[l] = std::log(pigreci[l])+std::lgamma(grado/2.0+1.0)-std::log(grado*pigreco)-
+                                std::log(determinanti[l])/2.0-std::lgamma(grado/2.0);
                         }
                         for (int l = 0; l < taglia; l++) {
+                            std::vector<double> esponenti(i);
+                            double esponentemassimo = -std::numeric_limits<double>::infinity();
                             const double ascissa = ascisse[l];
                             const double ordinata = ordinate[l];
-                            long double sommatoria = 0.0L;
                             for (int m = 0; m < i; m++) {
                                 const double differenzaascisse = ascissa - muascisse[m];
                                 const double differenzaordinate = ordinata - muordinate[m];
-                                const int grado = nu[m];
-                                const long double membro = precostanti[m] / std::sqrt(determinanti[m]) * std::pow(1.0L +
-                                                              (inverse11[m] * differenzaascisse * differenzaascisse +
-                                                               2.0L * inverse12[m] *
-                                                               differenzaascisse * differenzaordinate + inverse22[m] *
-                                                               differenzaordinate *
-                                                               differenzaordinate) / grado,
-                                                          -grado / 2.0L - 1.0L) * pigreci[m];
-                                sommatoria += membro;
-                                verosimiglianzepigreci[l][m] = membro;
+                                const double grado = nu[m];
+                                const double esponente = precostanti2[m]-(grado+2.0)/2.0*std::log(1.0+(inverse11[m]*
+                                    differenzaascisse*differenzaascisse+2.0*inverse12[m]*differenzaascisse*differenzaordinate+
+                                        inverse22[m]*differenzaordinate*differenzaordinate)/grado);
+                                esponenti[m] = esponente;
+                                if (esponente > esponentemassimo){esponentemassimo = esponente;}
                             }
-                            if (sommatoria < 1e-300L){sommatoria = 1e-300L;}
-                            logverosimiglianzacorrente += static_cast<double>(std::log(sommatoria));
+                            logverosimiglianzepigreci[l] = esponenti;
+                            double sommatoria = 0.0;
+                            for (int m = 0; m < i; m++){sommatoria += std::exp(esponenti[m]-esponentemassimo);}
+                            logverosimiglianzacorrente += esponentemassimo+std::log(sommatoria);
                         }
                         // Dalla seconda iterazione in poi controlliamo la convergenza con l'accelerazione di Aitken.
                         if (k != 0) {
                             const double precedente = logverosimiglianzeprecedenti[1];
                             if (precedente-logverosimiglianzeprecedenti[0] < 0.000001){break;}
-                            const double accelerazione = (logverosimiglianzacorrente - precedente) /
-                                                         (precedente - logverosimiglianzeprecedenti[0]);
+			                double accelerazione = (logverosimiglianzacorrente - precedente)/
+			                    (precedente - logverosimiglianzeprecedenti[0]);
+			                if (accelerazione == 1.0) {accelerazione -= 0.000001;}
                             const double linfinito = precedente + 1.0 / (1.0 - accelerazione) *
-                                                     (logverosimiglianzacorrente - precedente);
+                                (logverosimiglianzacorrente - precedente);
                             if (std::abs(linfinito - precedente) < sogliaconvergenza) { break; }
                         }
                     }
@@ -5734,7 +6148,7 @@ void clusteringconcriterio(const int minimo, const int massimo, const int taglia
         std::vector<double> sigma11finali(i);
         std::vector<double> sigma22finali(i);
         std::vector<double> sigma12finali(i);
-        std::vector<int> nufinali(i);
+        std::vector<double> nufinali(i);
         std::vector<std::vector<double>> pesifinali(taglia, std::vector<double>(i));
         // Viene eseguito il clustering.
         veroclustering(normale, i, iterazioniinizializzazione, taglia, inizializzazione, ascisse, ordinate,
@@ -5798,7 +6212,7 @@ void clusteringconcriterio(const int minimo, const int massimo, const int taglia
 void clusteringconbootstrap(const int minimo, const int massimo, const int taglia, const bool normale,
     const int i, std::vector<double> &pigreci, std::vector<double> &muascisse, std::vector<double> &muordinate,
     std::vector<double> &sigma11, std::vector<double> &sigma22, std::vector<double> &sigma12,
-    std::vector<int> &nu, const int iterazioniinizializzazione,
+    std::vector<double> &nu, const int iterazioniinizializzazione,
     const std::string &inizializzazione, const int iterazionikmeans, const std::string &algoritmo,
     const int iterazioniEM,
     const double sogliaconvergenza, std::vector<double> &statisticheempiriche) {
@@ -5846,9 +6260,11 @@ void clusteringconbootstrap(const int minimo, const int massimo, const int tagli
             // Riapplichiamo delle trasformazioni per rendere le osservazioni conformi alle medie
             // e matrici di covarianze della propria componente. Dopo di che, rendiamo le osservazioni
             // delle t di Student con \nu gradi di libertà.
-            std::vector<std::chi_squared_distribution<>> chiquadro;
+            std::vector<std::gamma_distribution<double>> chiquadro;
             chiquadro.reserve(i-1);
-            for (int v : nu){chiquadro.emplace_back(v);}
+            for (double v : nu){
+                if (v/2.0 <= 0.2){chiquadro.emplace_back(0.2, 2.0);} else {chiquadro.emplace_back(v/2.0, 2.0);}
+            }
             for (int k = 0; k < taglia; k++) {
                 const int componente = estrattorecomponenti(generatore);
                 const double cholesky11 = std::sqrt(sigma11[componente]);
@@ -5856,7 +6272,7 @@ void clusteringconbootstrap(const int minimo, const int massimo, const int tagli
                 const double cholesky22 = std::sqrt(sigma22[componente] - cholesky12 * cholesky12);
                 const double ascissanormale = cholesky11 * ascissegrezze[k];
                 const double ordinatanormale = cholesky12*ascissegrezze[k]+cholesky22*ordinategrezze[k];
-                if (nu[componente] < 1){throw std::runtime_error("Un grado di libertà è non positivo");}
+                if (nu[componente] <= 0.0){throw std::runtime_error("Un grado di libertà è non positivo");}
                 const double denominatore = std::sqrt(chiquadro[componente](generatore) / nu[componente]);
                 ascissebootstrap[k] = ascissanormale/denominatore+muascisse[componente];
                 ordinatebootstrap[k] = ordinatanormale/denominatore+muordinate[componente];
@@ -5872,7 +6288,7 @@ void clusteringconbootstrap(const int minimo, const int massimo, const int tagli
         std::vector<double> sigma11bootstrap1(i-1);
         std::vector<double> sigma22bootstrap1(i-1);
         std::vector<double> sigma12bootstrap1(i-1);
-        std::vector<int> nubootstrap1(i-1);
+        std::vector<double> nubootstrap1(i-1);
         std::vector<std::vector<double>> pesibootstrap1(taglia, std::vector<double>(i - 1));
         veroclustering(normale, i - 1, iterazioniinizializzazione, taglia, inizializzazione,
                        ascissebootstrap, ordinatebootstrap, iterazionikmeans, algoritmo, iterazioniEM,
@@ -5888,7 +6304,7 @@ void clusteringconbootstrap(const int minimo, const int massimo, const int tagli
         std::vector<double> sigma11bootstrap2(i);
         std::vector<double> sigma22bootstrap2(i);
         std::vector<double> sigma12bootstrap2(i);
-        std::vector<int> nubootstrap2(i);
+        std::vector<double> nubootstrap2(i);
         std::vector<std::vector<double>> pesibootstrap2(taglia, std::vector<double>(i));
         veroclustering(normale, i, iterazioniinizializzazione, taglia, inizializzazione,
                        ascissebootstrap, ordinatebootstrap, iterazionikmeans, algoritmo, iterazioniEM,
@@ -5918,7 +6334,7 @@ void clusteringconbootstrap(const int minimo, const int massimo, const int tagli
 void clusteringcondoppiobootstrap(const int minimo, const int massimo, const int taglia, const bool normale,
     const int i, std::vector<double> &pigreci, std::vector<double> &muascisse, std::vector<double> &muordinate,
     std::vector<double> &sigma11, std::vector<double> &sigma22, std::vector<double> &sigma12,
-    std::vector<int> &nu, const int iterazioniinizializzazione,
+    std::vector<double> &nu, const int iterazioniinizializzazione,
     const std::string &inizializzazione, const int iterazionikmeans, const std::string &algoritmo, const int iterazioniEM,
     const double sogliaconvergenza, std::vector<double> &statisticheempiriche,
     std::vector<std::vector<double>> &tutteinterne,
@@ -5967,9 +6383,11 @@ void clusteringcondoppiobootstrap(const int minimo, const int massimo, const int
             // Riapplichiamo delle trasformazioni per rendere le osservazioni conformi alle medie
             // e matrici di covarianze della propria componente. Dopo di che, rendiamo le osservazioni
             // delle t di Student con \nu gradi di libertà.
-            std::vector<std::chi_squared_distribution<>> chiquadro;
+            std::vector<std::gamma_distribution<double>> chiquadro;
             chiquadro.reserve(i-1);
-            for (int v : nu){chiquadro.emplace_back(v);}
+            for (double v : nu){
+                if (v/2.0 <= 0.2){chiquadro.emplace_back(0.2, 2.0);} else {chiquadro.emplace_back(v/2.0, 2.0);}
+            }
             for (int k = 0; k < taglia; k++) {
                 const int componente = estrattorecomponenti(generatore);
                 const double cholesky11 = std::sqrt(sigma11[componente]);
@@ -5977,7 +6395,7 @@ void clusteringcondoppiobootstrap(const int minimo, const int massimo, const int
                 const double cholesky22 = std::sqrt(sigma22[componente] - cholesky12 * cholesky12);
                 const double ascissanormale = cholesky11 * ascissegrezze[k];
                 const double ordinatanormale = cholesky12*ascissegrezze[k]+cholesky22*ordinategrezze[k];
-                if (nu[componente] < 1){throw std::runtime_error("Un grado di libertà è non positivo");}
+                if (nu[componente] <= 0.0){throw std::runtime_error("Un grado di libertà è non positivo");}
                 const double denominatore = std::sqrt(chiquadro[componente](generatore) / nu[componente]);
                 ascissebootstrap[k] = ascissanormale/denominatore+muascisse[componente];
                 ordinatebootstrap[k] = ordinatanormale/denominatore+muordinate[componente];
@@ -5992,7 +6410,7 @@ void clusteringcondoppiobootstrap(const int minimo, const int massimo, const int
         std::vector<double> sigma111(i-1);
         std::vector<double> sigma221(i-1);
         std::vector<double> sigma121(i-1);
-        std::vector<int> nu1(i-1);
+        std::vector<double> nu1(i-1);
         std::vector<std::vector<double>> pesibootstrap1(taglia, std::vector<double>(i - 1));
         veroclustering(normale, i - 1, iterazioniinizializzazione, taglia, inizializzazione,
                        ascissebootstrap, ordinatebootstrap, iterazionikmeans, algoritmo, iterazioniEM,
@@ -6007,7 +6425,7 @@ void clusteringcondoppiobootstrap(const int minimo, const int massimo, const int
         std::vector<double> sigma112(i);
         std::vector<double> sigma222(i);
         std::vector<double> sigma122(i);
-        std::vector<int> nu2(i);
+        std::vector<double> nu2(i);
         std::vector<std::vector<double> > pesibootstrap2(taglia, std::vector<double>(i));
         veroclustering(normale, i, iterazioniinizializzazione, taglia, inizializzazione,
                        ascissebootstrap, ordinatebootstrap, iterazionikmeans, algoritmo, iterazioniEM,
@@ -6058,9 +6476,11 @@ void clusteringcondoppiobootstrap(const int minimo, const int massimo, const int
                 // Riapplichiamo delle trasformazioni per rendere le osservazioni conformi alle medie
                 // e matrici di covarianze della propria componente. Dopo di che, rendiamo le osservazioni
                 // delle t di Student con \nu gradi di libertà.
-                std::vector<std::chi_squared_distribution<>> chiquadro;
+                std::vector<std::gamma_distribution<double>> chiquadro;
                 chiquadro.reserve(i-1);
-                for (int v : nu){chiquadro.emplace_back(v);}
+                for (double v : nu1){
+                    if (v/2.0 <= 0.2){chiquadro.emplace_back(0.2, 2.0);} else {chiquadro.emplace_back(v/2.0, 2.0);}
+                }
                 for (int l = 0; l < taglia; l++) {
                     const int componente = estrattorecomponenti(generatore);
                     const double cholesky11 = std::sqrt(sigma111[componente]);
@@ -6068,7 +6488,7 @@ void clusteringcondoppiobootstrap(const int minimo, const int massimo, const int
                     const double cholesky22 = std::sqrt(sigma221[componente] - cholesky12 * cholesky12);
                     const double ascissanormale = cholesky11 * ascisseinternegrezze[l];
                     const double ordinatanormale = cholesky12*ascisseinternegrezze[l]+cholesky22*ordinateinternegrezze[l];
-                    if (nu1[componente] < 1){throw std::runtime_error("Un grado di libertà è non positivo");}
+                    if (nu1[componente] <= 0.0){throw std::runtime_error("Un grado di libertà è non positivo");}
                     const double denominatore = std::sqrt(chiquadro[componente](generatore) / nu1[componente]);
                     ascisseinterne[l] = ascissanormale/denominatore+muascisse1[componente];
                     ordinateinterne[l] = ordinatanormale/denominatore+muordinate1[componente];
@@ -6082,7 +6502,7 @@ void clusteringcondoppiobootstrap(const int minimo, const int massimo, const int
             std::vector<double> sigma11interne1(i-1);
             std::vector<double> sigma22interne1(i-1);
             std::vector<double> sigma12interne1(i-1);
-            std::vector<int> nuinterni1(i-1);
+            std::vector<double> nuinterni1(i-1);
             std::vector<std::vector<double>> pesiinterni1(taglia, std::vector<double>(i - 1));
             veroclustering(normale, i - 1, iterazioniinizializzazione, taglia, inizializzazione,
                            ascisseinterne, ordinateinterne, iterazionikmeans, algoritmo, iterazioniEM,
@@ -6098,7 +6518,7 @@ void clusteringcondoppiobootstrap(const int minimo, const int massimo, const int
             std::vector<double> sigma11interne2(i);
             std::vector<double> sigma22interne2(i);
             std::vector<double> sigma12interne2(i);
-            std::vector<int> nuinterni2(i);
+            std::vector<double> nuinterni2(i);
             std::vector<std::vector<double>> pesiinterni2(taglia, std::vector<double>(i));
             veroclustering(normale, i, iterazioniinizializzazione, taglia, inizializzazione,
                            ascisseinterne, ordinateinterne, iterazionikmeans, algoritmo, iterazioniEM,
@@ -6149,11 +6569,11 @@ void clusteringconcrossvalidation(const int minimo, const int massimo, const int
         std::vector<double> sigma11(i);
         std::vector<double> sigma22(i);
         std::vector<double> sigma12(i);
-        std::vector<int> nu(i);
+        std::vector<double> nu(i);
         double logverosimiglianza = 0.0;
-        std::vector<int> cluster(taglia);
-        std::vector<std::vector<double> > pesi(taglia, std::vector<double>(i));
-        veroclustering(normale, i, iterazioniinizializzazione, taglia, inizializzazione,
+        std::vector<int> cluster(taglia-tagliatestset);
+        std::vector<std::vector<double> > pesi(taglia-tagliatestset, std::vector<double>(i));
+        veroclustering(normale, i, iterazioniinizializzazione, taglia-tagliatestset, inizializzazione,
                        ascissetraining, ordinatetraining, iterazionikmeans, algoritmo, iterazioniEM,
                        logverosimiglianza,
                        cluster, sogliaconvergenza, pigreci, muascisse, muordinate, sigma11,
@@ -6164,11 +6584,16 @@ void clusteringconcrossvalidation(const int minimo, const int massimo, const int
         std::vector<double> inversa22(i);
         std::vector<double> inversa12(i);
         for (int k = 0; k < i; k++) {
-            const double covarianza = sigma12[k];
+            const double prodottovarianze = std::sqrt(sigma11[k]*sigma22[k]);
+            double covarianza = sigma12[k];
+            if (covarianza < -prodottovarianze || covarianza > prodottovarianze){
+                covarianza = std::copysign(prodottovarianze, covarianza);
+                sigma12[k] = covarianza;
+            }
             double determinante = sigma11[k]*sigma22[k]-covarianza*covarianza;
             if (determinante < 0.000001) {
-                sigma11[k] += 0.00001;
-                sigma22[k] += 0.00001;
+                sigma11[k] += 0.001;
+                sigma22[k] += 0.001;
                 determinante = sigma11[k]*sigma22[k]-covarianza*covarianza;
             }
             determinanti[k] = determinante;
@@ -6179,35 +6604,54 @@ void clusteringconcrossvalidation(const int minimo, const int massimo, const int
         // Adesso calcoliamo il log-predictive score di questa fold.
         double logpredictivescore = 0.0;
         if (normale) {
+            std::vector<double> precostanti(i);
+            for (int k = 0; k < i; k++){
+                precostanti[k] = std::log(pigreci[k])-logduepigreco-std::log(determinanti[k])/2.0;
+            }
             for (int k = 0; k < tagliatestset; k++) {
+                std::vector<double> esponenti(i);
+                double esponentemassimo = -std::numeric_limits<double>::infinity();
                 const double ascissa = ascissetest[k];
                 const double ordinata = ordinatetest[k];
-                long double sommatoria = 0.0;
                 for (int l = 0; l < i; l++) {
                     const double distanzaascisse = ascissa-muascisse[l];
                     const double distanzaordinate = ordinata-muordinate[l];
-                    sommatoria += pigreci[l]*(-1.0L/(2.0L*pigreco*std::sqrt(determinanti[l]))*
-                        std::exp(-0.5L*(inversa11[l]*distanzaascisse*distanzaascisse+2.0L*inversa12[l]*
-                            distanzaascisse*distanzaordinate+inversa22[l]*distanzaordinate*distanzaordinate)));
+                    const double esponente = precostanti[l]-(inversa11[l]*distanzaascisse*distanzaascisse+
+                        2.0*inversa12[l]*distanzaascisse*distanzaordinate+inversa22[l]*distanzaordinate*
+                            distanzaordinate)/2.0;
+                    esponenti[l] = esponente;
+                    if (esponente > esponentemassimo){esponentemassimo = esponente;}
                 }
-                logpredictivescore += static_cast<double>(std::log(sommatoria));
+                double sommatoria = 0.0;
+                for (int l = 0; l < i; l++){sommatoria += std::exp(esponenti[l]-esponentemassimo);}
+                logpredictivescore += esponentemassimo+std::log(sommatoria);
             }
         } else {
+            std::vector<double> precostanti(i);
+            for (int k = 0; k < i; k++){
+                const double grado = nu[k];
+                precostanti[k] = std::log(pigreci[k])+std::lgamma(grado/2.0+1.0)-std::log(grado*pigreco)-
+                    std::log(determinanti[k])/2.0-std::lgamma(grado/2.0);
+            }
             for (int k = 0; k < taglia; k++) {
+                std::vector<double> esponenti(i);
+                double esponentemassimo = -std::numeric_limits<double>::infinity();
                 const double ascissa = ascissetest[k];
                 const double ordinata = ordinatetest[k];
-                long double sommatoria = 0.0;
                 for (int l = 0; l < i; l++) {
-                    const int grado = nu[l];
-                    if (grado < 1){throw std::runtime_error("Un grado di libertà è non positivo");}
+                    const double grado = nu[l];
+                    if (grado <= 0.0){throw std::runtime_error("Un grado di libertà è non positivo");}
                     const double distanzaascisse = ascissa-muascisse[l];
                     const double distanzaordinate = ordinata-muordinate[l];
-                    sommatoria += pigreci[l]*std::tgamma(grado/2.0L+1.0L)/(std::tgamma(grado/2.0L)*grado*
-                        pigreco*std::sqrt(determinanti[l]))*std::pow(1.0L+1.0L/grado*(inversa11[l]*
-                        distanzaascisse*distanzaascisse+2.0L*inversa12[l]*distanzaascisse*distanzaordinate+
-                        inversa22[l]*distanzaordinate*distanzaordinate), -(grado/2.0L+1.0L));
+                    const double esponente = precostanti[l]-(grado+2.0)/2.0*std::log(1.0+(inversa11[l]*
+                        distanzaascisse*distanzaascisse+2.0*inversa12[l]*distanzaascisse*distanzaordinate+
+                            inversa22[l]*distanzaordinate*distanzaordinate)/grado);
+                    esponenti[l] = esponente;
+                    if (esponente > esponentemassimo){esponentemassimo = esponente;}
                 }
-                logpredictivescore += static_cast<double>(std::log(sommatoria));
+                double sommatoria = 0.0;
+                for (int l = 0; l < i; l++){sommatoria += std::exp(esponenti[l]-esponentemassimo);}
+                logpredictivescore += esponentemassimo+std::log(sommatoria);
             }
         }
         stimecrossvalidate[j] = logpredictivescore;
@@ -6253,7 +6697,7 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
     if (ascisse.size() != taglia || ordinate.size() != taglia){throw std::runtime_error("Il dataset non coincide con la taglia");}
     if (iterazionikmeans < 1){throw std::runtime_error("Le iterazioni devono essere positive");}
     if (componentimassime < 2){throw std::runtime_error("Il clustering deve avere almeno due componenti");}
-    if (selezione != "criterio" && selezione != "bootstrap" && selezione != "doppiobootstrap" && selezione != "crossvalidation"){throw std::runtime_error("Criterio di selezione del modello non valido");}
+    if (selezione != "criterio" && selezione != "bootstrap" && selezione != "doppiobootstrap" && selezione != "crossvalidation" && selezione != "mode"){throw std::runtime_error("Criterio di selezione del modello non valido");}
     if (campionibootstrap < 2){throw std::runtime_error("Il bootstrap deve fare almeno due iterazioni");}
     if (alfabootstrap <= 0.0 || alfabootstrap >= 1.0){throw std::runtime_error("Alfa non valido");}
     if (iterazioniinizializzazione < 1){throw std::runtime_error("Le iterazioni devono essere positive");}
@@ -6263,11 +6707,87 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
     if (criterioscelto != "AIC" && criterioscelto != "BIC" && criterioscelto != "ICL"){throw std::runtime_error("Criterio informativo non valido");}
     if (bootstrapinterni < 2){throw std::runtime_error("Il bootstrap deve fare almeno due iterazioni");}
     if (fold < 2){throw std::runtime_error("La cross-validation deve fare almeno due fold");}
+    if (selezione == "mode") {
+        double mediaascisse = 0.0;
+        double mediaordinate = 0.0;
+        for (int i = 0; i < taglia; i++) {
+            mediaascisse += ascisse[i];
+            mediaordinate += ordinate[i];
+        }
+        mediaascisse /= taglia;
+        mediaordinate /= taglia;
+        double deviazioneascisse = 0.0;
+        double deviazioneordinate = 0.0;
+        for (int i = 0; i < taglia; i++){
+            const double differenzaascisse = ascisse[i]-mediaascisse;
+            const double differenzaordinate = ordinate[i]-mediaordinate;
+            deviazioneascisse += differenzaascisse*differenzaascisse;
+            deviazioneordinate += differenzaordinate*differenzaordinate;
+        }
+        deviazioneascisse /= taglia-1;
+        deviazioneordinate /= taglia-1;
+        const double bandwidthascisse = 1.06*std::sqrt(deviazioneascisse)/std::pow(taglia, 0.2);
+        const double bandwidthordinate = 1.06*std::sqrt(deviazioneordinate)/std::pow(taglia, 0.2);
+        const double frazionegaussiana = 1.0/std::sqrt(2.0*pigreco);
+        const double frazionemediatrice = 1.0/(taglia*bandwidthascisse*bandwidthordinate);
+        const double frazioneintera = frazionegaussiana*frazionemediatrice;
+        std::array<std::array<double, 100>, 100> griglia;
+        for (int i = 0; i < 100; i++) {
+            const double ascissacella = (2.0*i-99.0)/100.0;
+            for (int j = 0; j < 100; j++){
+                const double ordinatacella = (2.0*j-99.0)/100.0;
+                double kernel = 0.0;
+                for (int k = 0; k < taglia; k++) {
+                    const double primoargomento = (ascissacella-ascisse[k])/bandwidthascisse;
+                    const double secondoargomento = (ordinatacella-ordinate[k])/bandwidthordinate;
+                    kernel += std::exp(-(primoargomento*primoargomento+secondoargomento*secondoargomento)/2.0);
+                }
+                griglia[i][j] = frazioneintera*kernel;
+            }
+        }
+        int numeropicchi = 0;
+        if (griglia[0][0] > griglia[1][0] && griglia[0][0] > griglia[0][1] && griglia[0][0] > griglia[1][1]){numeropicchi++;}
+        if (griglia[99][0] > griglia[98][0] && griglia[99][0] > griglia[99][1] && griglia[99][0] > griglia[98][1]){numeropicchi++;}
+        if (griglia[0][99] > griglia[0][98] && griglia[0][99] > griglia[1][99] && griglia[0][99] > griglia[1][98]){numeropicchi++;}
+        if (griglia[99][99] > griglia[98][99] && griglia[99][99] > griglia[99][98] && griglia[99][99] > griglia[98][98]){numeropicchi++;}
+        for (int i = 1; i < 100; i++) {
+            const double cella1 = griglia[0][i];
+            if (cella1 > griglia[0][i-1] && cella1 > griglia[0][i+1] && cella1 > griglia[1][i-1] && cella1 > griglia[1][i] && cella1 > griglia[1][i+1]){numeropicchi++;}
+            const double cella2 = griglia[i][0];
+            if (cella2 > griglia[i-1][0] && cella2 > griglia[i+1][0] && cella2 > griglia[i-1][1] && cella2 > griglia[i][1] && cella2 > griglia[i+1][1]){numeropicchi++;}
+            const double cella3 = griglia[99][i];
+            if (cella3 > griglia[99][i-1] && cella3 > griglia[99][i+1] && cella3 > griglia[98][i-1] && cella3 > griglia[98][i] && cella3 > griglia[98][i+1]){numeropicchi++;}
+            const double cella4 = griglia[i][99];
+            if (cella4 > griglia[i-1][99] && cella4 > griglia[i+1][99] && cella4 > griglia[i-1][98] && cella4 > griglia[i][98] && cella4 > griglia[i+1][98]){numeropicchi++;}
+            for (int j = 1; j < 100; j++) {
+                const double cella = griglia[i][j];
+                if (cella > griglia[i-1][j-1] && cella > griglia[i-1][j] && cella > griglia[i-1][j+1] && cella > griglia[i][j-1] && cella > griglia[i][j+1] && cella > griglia[i+1][j-1] && cella > griglia[i+1][j] && cella > griglia[i+1][j+1]){numeropicchi++;}
+            }
+        }
+        if (numeropicchi < 2) {
+            numeropicchi = 2;
+        }
+        double logverosimiglianza = 0.0;
+        std::vector<int> cluster(taglia);
+        std::vector<double> pigreci(numeropicchi);
+        std::vector<double> muascisse(numeropicchi);
+        std::vector<double> muordinate(numeropicchi);
+        std::vector<double> sigma11(numeropicchi);
+        std::vector<double> sigma22(numeropicchi);
+        std::vector<double> sigma12(numeropicchi);
+        std::vector<double> nu(numeropicchi, 5.0);
+        std::vector<std::vector<double>> pesi(taglia, std::vector<double>(numeropicchi));
+        veroclustering(normale, numeropicchi, iterazioniinizializzazione, taglia, inizializzazione, ascisse, ordinate,
+            iterazionikmeans, algoritmo, iterazioniEM, logverosimiglianza, cluster, sogliaconvergenza, pigreci,
+            muascisse, muordinate, sigma11, sigma22, sigma12, nu, pesi);
+        return cluster;
+    }
     if (selezione == "criterio") {
         // Prepariamo i thread.
         int numerothread = static_cast<int>(std::thread::hardware_concurrency());
         if (numerothread == 0){numerothread = 4;}
-        std::vector<std::thread> thread(numerothread);
+        std::vector<std::thread> thread;
+        thread.reserve(numerothread);
         // Assegniamo a ogni thread una parte del numero di componenti da esaminare: in particolare
         // iniziamo dando a tutti parti uguali e distribuendo poi il resto. Quindi se per
         // esempio vogliamo esaminare da 2 a 10 componenti e abbiamo 4 thread, dobbiamo distribuire
@@ -6284,18 +6804,51 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
         // Se viene trovata una partizione che batte il record attuale, questa viene salvata.
         std::vector<std::vector<int>> candidaticlusterfinali(numerothread);
         std::vector<double> candidaticriterio(numerothread, std::numeric_limits<double>::infinity());
+        std::vector<std::exception_ptr> thread_exceptions(numerothread);
         int inizio = 2;
         for (int i = 0; i < numerothread; i++) {
             // Assegniamo a ogni thread i numeri k che gli spettano.
-            int fine = inizio+iterazioniathread[i];
-            thread.emplace_back(clusteringconcriterio, inizio, fine, taglia, normale, iterazioniinizializzazione,
-                inizializzazione, ascisse, ordinate, iterazionikmeans, algoritmo, iterazioniEM, sogliaconvergenza,
-                criterioscelto, std::ref(candidaticriterio[i]), std::ref(candidaticlusterfinali[i]));
+            int fine = inizio + iterazioniathread[i];
+            thread.emplace_back([&, i, inizio, fine](){
+                try {
+                    clusteringconcriterio(inizio, fine, taglia, normale, iterazioniinizializzazione,
+                        inizializzazione, ascisse, ordinate, iterazionikmeans, algoritmo, iterazioniEM, sogliaconvergenza,
+                        criterioscelto, std::ref(candidaticriterio[i]),
+                        std::ref(candidaticlusterfinali[i]));
+                } catch(...) {
+                    thread_exceptions[i] = std::current_exception();
+                }
+            });
             inizio = fine;
         }
+        int it = 0;
         // Aspettiamo che i thread finiscano.
         for (auto& t : thread) {
-            t.join();
+            try {
+                if (t.joinable()) {
+                    t.join();
+                } else {
+                    std::cout << "Thread numero " << it << " inattaccabile\n" << std::flush;
+                }
+            } catch (const std::system_error& e) {
+                std::cerr << "System_error sollevato col thread " << it << ": " << e.what() << "\n" << std::flush;
+            } catch (const std::exception& e) {
+                std::cerr << "Errore generico sollevato col thread " << it << ": " << e.what() << "\n" << std::flush;
+            } catch (...) {
+                std::cerr << "Eccezione ignota col thread " << it << "\n" << std::flush;
+            }
+            it++;
+        }
+        for (int i = 0; i < numerothread; i++){
+            if (thread_exceptions[i]){
+                try {
+                    std::rethrow_exception(thread_exceptions[i]);
+                } catch (const std::exception& e) {
+                    std::cerr << "Il worker " << i << " ha lanciato: " << e.what() << "\n";
+                } catch (...) {
+                    std::cerr << "Il worker " << i << " ha lanciato un'eccezione fuori da std\n";
+                }
+            }
         }
         // Troviamo tra le soluzioni di tutti i thread quella col criterio minimo.
         if (numerothread == 1) {
@@ -6316,7 +6869,9 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
         // Prepariamo i thread.
         int numerothread = static_cast<int>(std::thread::hardware_concurrency());
         if (numerothread == 0){numerothread = 4;}
-        std::vector<std::thread> thread(numerothread);
+        std::vector<std::thread> thread;
+        thread.reserve(numerothread);
+        std::vector<std::exception_ptr> thread_exceptions(numerothread);
         // Contrariamente al caso precedente in cui usavamo i criteri informativi, stavolta i thread
         // verranno utilizzati per calcolare le statistiche bootstrap. Dunque, anche se con un meccanismo
         // simile a prima, assegniamo a ciascuno il numero di campioni bootstrap da estrarre.
@@ -6336,7 +6891,7 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
         std::vector<double> sigma111(2);
         std::vector<double> sigma221(2);
         std::vector<double> sigma121(2);
-        std::vector<int> nu1(2);
+        std::vector<double> nu1(2);
         std::vector<std::vector<double>> pesifinali1(taglia, std::vector<double>(2));
         veroclustering(normale, 2, iterazioniinizializzazione, taglia, inizializzazione, ascisse, ordinate,
             iterazionikmeans, algoritmo, iterazioniEM, logverosimiglianza1, cluster1, sogliaconvergenza,
@@ -6355,7 +6910,7 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
             std::vector<double> sigma112(i);
             std::vector<double> sigma222(i);
             std::vector<double> sigma122(i);
-            std::vector<int> nu2(i);
+            std::vector<double> nu2(i);
             std::vector<std::vector<double>> pesifinali2(taglia, std::vector<double>(i));
             veroclustering(normale, i, iterazioniinizializzazione, taglia, inizializzazione, ascisse, ordinate,
                 iterazionikmeans, algoritmo, iterazioniEM, logverosimiglianza2, cluster2, sogliaconvergenza,
@@ -6368,20 +6923,52 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
             int inizio = 0;
             for (int j = 0; j < numerothread; j++) {
                 int fine = inizio + iterazioniathread[j];
-                thread.emplace_back(clusteringconbootstrap, inizio, fine, taglia, normale, i,
-                    std::ref(pigreci1), std::ref(muascisse1), std::ref(muordinate1),
-                    std::ref(sigma111), std::ref(sigma221), std::ref(sigma121), std::ref(nu1),
-                    iterazioniinizializzazione, inizializzazione, iterazionikmeans, algoritmo,
-                    iterazioniEM, sogliaconvergenza, std::ref(statisticheempiriche));
+                thread.emplace_back([&, i, inizio, fine](){
+                    try {
+                        clusteringconbootstrap(inizio, fine, taglia, normale, i,
+                            std::ref(pigreci1), std::ref(muascisse1), std::ref(muordinate1),
+                            std::ref(sigma111), std::ref(sigma221), std::ref(sigma121), std::ref(nu1),
+                            iterazioniinizializzazione, inizializzazione, iterazionikmeans, algoritmo,
+                            iterazioniEM, sogliaconvergenza, std::ref(statisticheempiriche));
+                    } catch(...) {
+                        thread_exceptions[j] = std::current_exception();
+                    }
+                });
                 inizio = fine;
             }
-            // Aspettiamo che tutto il vettore statisticheempiriche sia riempito.
-            for (auto &t: thread) {
-                t.join();
+            int it = 0;
+            // Aspettiamo che i thread finiscano.
+            for (auto& t : thread) {
+                try {
+                    if (t.joinable()) {
+                        t.join();
+                    } else {
+                        std::cout << "Thread numero " << it << " inattaccabile\n" << std::flush;
+                    }
+                } catch (const std::system_error& e) {
+                    std::cerr << "System_error sollevato col thread " << it << ": " << e.what() << "\n" << std::flush;
+                } catch (const std::exception& e) {
+                    std::cerr << "Errore generico sollevato col thread " << it << ": " << e.what() << "\n" << std::flush;
+                } catch (...) {
+                    std::cerr << "Eccezione ignota col thread " << it << "\n" << std::flush;
+                }
+                it++;
+            }
+            thread.clear();
+            for (int j = 0; j < numerothread; j++){
+                if (thread_exceptions[j]){
+                    try {
+                        std::rethrow_exception(thread_exceptions[j]);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Il worker " << j << " ha lanciato: " << e.what() << "\n";
+                    } catch (...) {
+                        std::cerr << "Il worker " << j << " ha lanciato un'eccezione fuori da std\n";
+                    }
+                }
             }
             // Calcoliamo il quantile 1-alfa della distribuzione empirica delle statistiche bootstrap.
             std::sort(statisticheempiriche.begin(), statisticheempiriche.end());
-            const double posizione = alfabootstrap*(campionibootstrap-1);
+            const double posizione = (1.0-alfabootstrap)*(campionibootstrap-1);
             const int sotto = static_cast<int>(std::floor(posizione));
             const int sopra = static_cast<int>(std::ceil(posizione));
             const double peso = posizione-sotto;
@@ -6416,7 +7003,9 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
         // Prepariamo i thread.
         int numerothread = static_cast<int>(std::thread::hardware_concurrency());
         if (numerothread == 0){numerothread = 4;}
-        std::vector<std::thread> thread(numerothread);
+        std::vector<std::thread> thread;
+        thread.reserve(numerothread);
+        std::vector<std::exception_ptr> thread_exceptions(numerothread);
         // Dividiamo le iterazioni come nel caso del bootstrap singolo.
         std::vector<int> iterazioniathread(numerothread, campionibootstrap/numerothread);
         for (int i = 0; i < campionibootstrap % numerothread; i++) {
@@ -6434,7 +7023,7 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
         std::vector<double> sigma111(2);
         std::vector<double> sigma221(2);
         std::vector<double> sigma121(2);
-        std::vector<int> nu1(2);
+        std::vector<double> nu1(2);
         std::vector<std::vector<double>> pesifinali1(taglia, std::vector<double>(2));
         veroclustering(normale, 2, iterazioniinizializzazione, taglia, inizializzazione, ascisse, ordinate,
             iterazionikmeans, algoritmo, iterazioniEM, logverosimiglianza1, cluster1, sogliaconvergenza,
@@ -6453,7 +7042,7 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
             std::vector<double> sigma112(i);
             std::vector<double> sigma222(i);
             std::vector<double> sigma122(i);
-            std::vector<int> nu2(i);
+            std::vector<double> nu2(i);
             std::vector<std::vector<double>> pesifinali2(taglia, std::vector<double>(i));
             veroclustering(normale, i, iterazioniinizializzazione, taglia, inizializzazione, ascisse, ordinate,
                 iterazionikmeans, algoritmo, iterazioniEM, logverosimiglianza2, cluster2, sogliaconvergenza,
@@ -6469,14 +7058,47 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
             int inizio = 0;
             for (int j = 0; j < numerothread; j++) {
                 int fine = inizio + iterazioniathread[j];
-                thread.emplace_back(clusteringcondoppiobootstrap, inizio, fine, taglia, normale, i, std::ref(pigreci1),
-                    std::ref(muascisse1), std::ref(muordinate1), std::ref(sigma111), std::ref(sigma221), std::ref(sigma121), std::ref(nu1),
-                    iterazioniinizializzazione, inizializzazione, iterazionikmeans, algoritmo,
-                    iterazioniEM, sogliaconvergenza, std::ref(statisticheempiriche), std::ref(tutteinterne), bootstrapinterni);
+                thread.emplace_back([&, i, inizio, fine](){
+                    try {
+                        clusteringcondoppiobootstrap(inizio, fine, taglia, normale, i, std::ref(pigreci1),
+                        std::ref(muascisse1), std::ref(muordinate1), std::ref(sigma111), std::ref(sigma221), std::ref(sigma121), std::ref(nu1),
+                        iterazioniinizializzazione, inizializzazione, iterazionikmeans, algoritmo,
+                        iterazioniEM, sogliaconvergenza, std::ref(statisticheempiriche), std::ref(tutteinterne), bootstrapinterni);
+                    } catch(...) {
+                        thread_exceptions[j] = std::current_exception();
+                    }
+                });
                 inizio = fine;
             }
-            for (auto &t: thread) {
-                t.join();
+            int it = 0;
+            // Aspettiamo che i thread finiscano.
+            for (auto& t : thread) {
+                try {
+                    if (t.joinable()) {
+                        t.join();
+                    } else {
+                        std::cout << "Thread numero " << it << " inattaccabile\n" << std::flush;
+                    }
+                } catch (const std::system_error& e) {
+                    std::cerr << "System_error sollevato col thread " << it << ": " << e.what() << "\n" << std::flush;
+                } catch (const std::exception& e) {
+                    std::cerr << "Errore generico sollevato col thread " << it << ": " << e.what() << "\n" << std::flush;
+                } catch (...) {
+                    std::cerr << "Eccezione ignota col thread " << it << "\n" << std::flush;
+                }
+                it++;
+            }
+            thread.clear();
+            for (int j = 0; j < numerothread; j++){
+                if (thread_exceptions[j]){
+                    try {
+                        std::rethrow_exception(thread_exceptions[j]);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Il worker " << j << " ha lanciato: " << e.what() << "\n";
+                    } catch (...) {
+                        std::cerr << "Il worker " << j << " ha lanciato un'eccezione fuori da std\n";
+                    }
+                }
             }
             // Usiamo le statistiche del secondo strato bootstrap per correggere quelle del primo.
             double mediastatisticheesterne = 0.0;
@@ -6495,7 +7117,7 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
             // Adesso finalmente calcoliamo il quantile della distribuzione empirica di -2log\lambda
             // ed eseguiamo il test d'ipotesi.
             std::sort(statisticheempiriche.begin(), statisticheempiriche.end());
-            const double posizione = alfabootstrap*(campionibootstrap-1);
+            const double posizione = (1.0-alfabootstrap)*(campionibootstrap-1);
             const int sotto = static_cast<int>(std::floor(posizione));
             const int sopra = static_cast<int>(std::ceil(posizione));
             const double peso = posizione-sotto;
@@ -6529,7 +7151,9 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
         // Prepariamo i thread e assegniamo a ciascuno il numero di fold che esamineranno.
         int numerothread = static_cast<int>(std::thread::hardware_concurrency());
         if (numerothread == 0){numerothread = 4;}
-        std::vector<std::thread> thread(numerothread);
+        std::vector<std::thread> thread;
+        thread.reserve(numerothread);
+        std::vector<std::exception_ptr> thread_exceptions(numerothread);
         std::vector<int> iterazioniathread(numerothread, fold/numerothread);
         for (int i = 0; i < fold % numerothread; i++) {
             iterazioniathread[i]++;
@@ -6544,13 +7168,46 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
             int inizio = 0;
             for (int j = 0; j < numerothread; j++) {
                 int fine = inizio + iterazioniathread[j];
-                thread.emplace_back(clusteringconcrossvalidation, inizio, fine, taglia, fold, i,
-                    ascisse, ordinate, normale, iterazioniinizializzazione, inizializzazione, iterazionikmeans, algoritmo,
-                    iterazioniEM, sogliaconvergenza, std::ref(listalogpredictivescore));
+                thread.emplace_back([&, i, inizio, fine](){
+                    try {
+                        clusteringconcrossvalidation(inizio, fine, taglia, fold, i,
+                        ascisse, ordinate, normale, iterazioniinizializzazione, inizializzazione, iterazionikmeans, algoritmo,
+                        iterazioniEM, sogliaconvergenza, std::ref(listalogpredictivescore));
+                    } catch(...) {
+                        thread_exceptions[j] = std::current_exception();
+                    }
+                });
                 inizio = fine;
             }
-            for (auto &t: thread) {
-                t.join();
+            int it = 0;
+            // Aspettiamo che i thread finiscano.
+            for (auto& t : thread) {
+                try {
+                    if (t.joinable()) {
+                        t.join();
+                    } else {
+                        std::cout << "Thread numero " << it << " inattaccabile\n" << std::flush;
+                    }
+                } catch (const std::system_error& e) {
+                    std::cerr << "System_error sollevato col thread " << it << ": " << e.what() << "\n" << std::flush;
+                } catch (const std::exception& e) {
+                    std::cerr << "Errore generico sollevato col thread " << it << ": " << e.what() << "\n" << std::flush;
+                } catch (...) {
+                    std::cerr << "Eccezione ignota col thread " << it << "\n" << std::flush;
+                }
+                it++;
+            }
+            thread.clear();
+            for (int j = 0; j < numerothread; j++){
+                if (thread_exceptions[j]){
+                    try {
+                        std::rethrow_exception(thread_exceptions[j]);
+                    } catch (const std::exception& e) {
+                        std::cerr << "Il worker " << j << " ha lanciato: " << e.what() << "\n";
+                    } catch (...) {
+                        std::cerr << "Il worker " << j << " ha lanciato un'eccezione fuori da std\n";
+                    }
+                }
             }
             double stimacrossvalidata = 0.0;
             for (int j = 0; j < fold; j++) {
@@ -6577,7 +7234,7 @@ std::vector<int> clustering(const std::string &inizializzazione, const int tagli
         std::vector<double> sigma11vere(componenti);
         std::vector<double> sigma22vere(componenti);
         std::vector<double> sigma12vere(componenti);
-        std::vector<int> nuveri(componenti);
+        std::vector<double> nuveri(componenti);
         std::vector<std::vector<double>> pesiveri(taglia, std::vector<double>(componenti));
         veroclustering(normale, componenti, iterazioniinizializzazione, taglia, inizializzazione,
             ascisse, ordinate, iterazionikmeans, algoritmo, iterazioniEM, logverosimiglianzavera,
@@ -6600,7 +7257,7 @@ int calcolabetatestnorme(const int taglia, const bool maggiore, const bool disug
     std::mt19937 generatore(dispositivo());
     // Se l'ipotesi alternativa è H_1:\mu>\mu_0:
     if (maggiore) {
-        std::normal_distribution<> normale(media+distanza, varianza);
+        std::normal_distribution<> normale(media+distanza, std::sqrt(varianza));
         for (int i = 0; i < iterazioni; i++) {
             // Estraiamo un campione sotto l'ipotesi alternativa e contemporaneamente calcoliamone la media.
             std::vector<double> campione(taglia);
@@ -6628,7 +7285,7 @@ int calcolabetatestnorme(const int taglia, const bool maggiore, const bool disug
         }
         // Facciamo una cosa simile se l'ipotesi alternativa è H_1:\mu\neq\mu_0.
     } else if (disuguale) {
-        std::normal_distribution<> normale(media+distanza, varianza);
+        std::normal_distribution<> normale(media+distanza, std::sqrt(varianza));
         for (int i = 0; i < iterazioni; i++) {
             std::vector<double> campione(taglia);
             double mediacampione = 0.0;
@@ -6653,7 +7310,7 @@ int calcolabetatestnorme(const int taglia, const bool maggiore, const bool disug
         }
         // Stessa cosa per H_1:\mu<\mu_0.
     } else {
-        std::normal_distribution<> normale(media-distanza, varianza);
+        std::normal_distribution<> normale(media-distanza, std::sqrt(varianza));
         for (int i = 0; i < iterazioni; i++) {
             std::vector<double> campione(taglia);
             double mediacampione = 0.0;
@@ -6731,7 +7388,7 @@ int calcolabetatestvarianze(const int taglia, const bool maggiore, const bool di
     std::random_device dispositivo;
     std::mt19937 generatore(dispositivo());
     if (maggiore) {
-        std::normal_distribution<> normale(0.0, ipotesinulla+distanza);
+        std::normal_distribution<> normale(0.0, std::sqrt(ipotesinulla+distanza));
         for (int i = 0; i < iterazioni; i++) {
             std::vector<double> campione(taglia);
             double mediacampione = 0.0;
@@ -6753,7 +7410,7 @@ int calcolabetatestvarianze(const int taglia, const bool maggiore, const bool di
             }
         }
     } else if (disuguale) {
-        std::normal_distribution<> normale(0.0, ipotesinulla+distanza);
+        std::normal_distribution<> normale(0.0, std::sqrt(ipotesinulla+distanza));
         for (int i = 0; i < iterazioni; i++) {
             std::vector<double> campione(taglia);
             double mediacampione = 0.0;
@@ -6775,7 +7432,7 @@ int calcolabetatestvarianze(const int taglia, const bool maggiore, const bool di
             }
         }
     } else {
-        std::normal_distribution<> normale(0.0, ipotesinulla-distanza);
+        std::normal_distribution<> normale(0.0, std::sqrt(ipotesinulla-distanza));
         for (int i = 0; i < iterazioni; i++) {
             std::vector<double> campione(taglia);
             double mediacampione = 0.0;
@@ -6916,20 +7573,27 @@ std::vector<bool> freccedifettose(const std::vector<double> &ascisse, const std:
         // Adesso calcoliamo la statistica test per un test di Hotelling a due campioni.
         const int n1 = numerodifettande-1;
         const int n2 = numeroaltre-1;
-        const int denominatore = n1+n2;
-        const double varianzaascissepooled = (n1*varianzaascissedifettande+n2*
-            varianzaascissealtre)/denominatore;
-        const double varianzaordinatepooled = (n1*varianzaordinatedifettande+n2*
-            varianzaordinatealtre)/denominatore;
-        const double covarianzapooled = (n1*covarianzadifettande+n2*
-            covarianzaaltre)/denominatore;
+        const double denominatore = n1+n2;
+        double varianzaascissepooled = (n1*varianzaascissedifettande+n2*varianzaascissealtre)/denominatore;
+        double varianzaordinatepooled = (n1*varianzaordinatedifettande+n2*varianzaordinatealtre)/denominatore;
+        double covarianzapooled = (n1*covarianzadifettande+n2*covarianzaaltre)/denominatore;
+        if (std::abs(covarianzapooled) > std::sqrt(varianzaascissepooled*varianzaordinatepooled)){covarianzapooled = std::sqrt(varianzaascissepooled*varianzaordinatepooled);}
+        double determinantepooled = varianzaascissepooled*varianzaordinatepooled-covarianzapooled*covarianzapooled;
+        if (determinantepooled < 0.000001){
+            varianzaascissepooled += 0.001;
+            varianzaordinatepooled += 0.001;
+            determinantepooled = varianzaascissepooled*varianzaordinatepooled-covarianzapooled*covarianzapooled;
+        }
+        const double inversapooled11 = varianzaordinatepooled/determinantepooled;
+        const double inversapooled22 = varianzaascissepooled/determinantepooled;
+        const double inversapooled12 = -covarianzapooled/determinantepooled;
         const double differenzamedieascisse = mediaascissedifettande-mediaascissealtre;
         const double differenzamedieordinate = mediaordinatedifettande-mediaordinatealtre;
-        const double statisticatest = (1.0/numerodifettande+1.0/numeroaltre)*((differenzamedieascisse*
-            (differenzamedieascisse*varianzaordinatepooled)-differenzamedieordinate*covarianzapooled)*
-                differenzamedieascisse+(differenzamedieordinate*varianzaascissepooled-differenzamedieascisse*
-                    covarianzapooled)*differenzamedieordinate)/(varianzaascissepooled*varianzaordinatepooled-
-                        covarianzapooled*covarianzapooled);
+        const double formaquadratica = inversapooled11*differenzamedieascisse*differenzamedieascisse+
+            inversapooled22*differenzamedieordinate*differenzamedieordinate+2.0*inversapooled12*
+                differenzamedieordinate*differenzamedieordinate;
+        const double statisticagrezza = (n1+1)*(n2+1)/static_cast<double>(n1+n2+2)*formaquadratica;
+        const double statisticatest = 0.5*(n1+n2-1)/static_cast<double>(n1+n2)*statisticagrezza;
         // Se rifiutiamo l'ipotesi nulla, ossia superiamo il valore critico, che le medie dei due gruppi
         // siano uguali, possiamo concludere che la freccia sia difettosa (dunque "true").
         risultati[i] = statisticatest > soglia;
@@ -6959,71 +7623,87 @@ int calcolabetahotellingduecampioni(const int iterazioni, const double varianzaa
     for (int i = 0; i < iterazioni; i++) {
         // Estraiamo un campione da una normale a media nulla e con la matrice di covarianze specificata;
         // contemporaneamente calcoliamone il vettore medio.
-        std::vector<double> ascisseprimocampione(taglia);
-        std::vector<double> ordinateprimocampione(taglia);
-        double mediaprimeascisse = 0.0;
-        double mediaprimeordinate = 0.0;
+        std::vector<double> ascissedifettande(difettande);
+        std::vector<double> ordinatedifettande(difettande);
+        double mediaascissedifettande = 0.0;
+        double mediaordinatedifettande = 0.0;
         for (int j = 0; j < difettande; j++) {
-            const double primaascissa = normale(generatore);
-            const double primaordinata = normale(generatore);
-            mediaprimeascisse += primaascissa;
-            mediaprimeordinate += primaordinata;
-            ascisseprimocampione[j] = cholesky11*primaascissa;
-            ordinateprimocampione[j] = cholesky12*primaascissa+cholesky22*primaordinata;
+            const double ascissa = normale(generatore);
+            const double ordinata = normale(generatore);
+            mediaascissedifettande += cholesky11*ascissa;
+            mediaordinatedifettande += cholesky12*ascissa+cholesky22*ordinata;
+            ascissedifettande[j] = cholesky11*ascissa;
+            ordinatedifettande[j] = cholesky12*ascissa+cholesky22*ordinata;
         }
         // Ed estraiamone un altro più grande con una media diversa nelle ascisse
         // ma la stessa matrice di covarianze.
-        std::vector<double> ascissesecondocampione(taglia);
-        std::vector<double> ordinatesecondocampione(taglia);
-        double mediasecondeascisse = 0.0;
-        double mediasecondeordinate = 0.0;
+        std::vector<double> ascissealtre(altre);
+        std::vector<double> ordinatealtre(altre);
+        double mediaascissealtre = 0.0;
+        double mediaordinatealtre = 0.0;
         for (int j = 0; j < altre; j++){
-            const double secondaascissa = normale(generatore);
-            const double secondaordinata = normale(generatore);
-            mediasecondeascisse += secondaascissa;
-            mediasecondeordinate += secondaordinata;
-            ascissesecondocampione[j] = distanza+cholesky11*secondaascissa;
-            ordinatesecondocampione[j] = cholesky12*secondaascissa+cholesky22*secondaordinata;
+            const double ascissa = normale(generatore);
+            const double ordinata = normale(generatore);
+            mediaascissealtre += distanza+cholesky11*ascissa;
+            mediaordinatealtre += cholesky12*ascissa+cholesky22*ordinata;
+            ascissealtre[j] = distanza+cholesky11*ascissa;
+            ordinatealtre[j] = cholesky12*ascissa+cholesky22*ordinata;
         }
-        mediaprimeascisse /= taglia;
-        mediaprimeordinate /= taglia;
-        mediasecondeascisse /= taglia;
-        mediasecondeordinate /= taglia;
+        mediaascissedifettande /= taglia;
+        mediaordinatedifettande /= taglia;
+        mediaascissealtre /= taglia;
+        mediaordinatealtre /= taglia;
         // Ora calcoliamo le varianze e le covarianze.
-        double varianzaprimeascisse = 0.0;
-        double varianzaprimeordinate = 0.0;
-        double primacovarianza = 0.0;
+        double varianzaascissedifettande = 0.0;
+        double varianzaordinatedifettande = 0.0;
+        double covarianzadifettande = 0.0;
         for (int j = 0; j < difettande; j++) {
-            const double differenzaascisse = ascisseprimocampione[j]-mediaprimeascisse;
-            const double differenzaordinate = ordinateprimocampione[j]-mediaprimeordinate;
-            varianzaprimeascisse += differenzaascisse*differenzaascisse;
-            varianzaprimeordinate += differenzaordinate*differenzaordinate;
-            primacovarianza += differenzaascisse*differenzaordinate;
+            const double differenzaascisse = ascissedifettande[j]-mediaascissedifettande;
+            const double differenzaordinate = ordinatedifettande[j]-mediaordinatedifettande;
+            varianzaascissedifettande += differenzaascisse*differenzaascisse;
+            varianzaordinatedifettande += differenzaordinate*differenzaordinate;
+            covarianzadifettande += differenzaascisse*differenzaordinate;
         }
-        double varianzasecondeascisse = 0.0;
-        double varianzasecondeordinate = 0.0;
-        double secondacovarianza = 0.0;
+        varianzaascissedifettande /= difettande-1;
+        varianzaordinatedifettande /= difettande-1;
+        covarianzadifettande /= difettande-1;
+        double varianzaascissealtre = 0.0;
+        double varianzaordinatealtre = 0.0;
+        double covarianzaaltre = 0.0;
         for (int j = 0; j < altre; j++){
-            const double differenzaascisse = ascissesecondocampione[j]-mediasecondeascisse;
-            const double differenzaordinate = ordinatesecondocampione[j]-mediasecondeordinate;
-            varianzasecondeascisse += differenzaascisse*differenzaascisse;
-            varianzasecondeordinate += differenzaordinate*differenzaordinate;
-            secondacovarianza += differenzaascisse*differenzaordinate;
+            const double differenzaascisse = ascissealtre[j]-mediaascissealtre;
+            const double differenzaordinate = ordinatealtre[j]-mediaordinatealtre;
+            varianzaascissealtre += differenzaascisse*differenzaascisse;
+            varianzaordinatealtre += differenzaordinate*differenzaordinate;
+            covarianzaaltre += differenzaascisse*differenzaordinate;
         }
+        varianzaascissealtre /= altre-1;
+        varianzaordinatealtre /= altre-1;
+        covarianzaaltre /= altre-1;
         // Ora calcoliamo la statistica test e registriamo se l'ipotesi nulla viene accettata.
-        const double varianzaascissepooled = ((difettande-1)*varianzaprimeascisse+(altre-1)*varianzasecondeascisse)/
-            (taglia-2);
-        const double varianzaordinatepooled = ((difettande-1)*varianzaprimeordinate+(altre-1)*varianzasecondeordinate)/
-            (taglia-2);
-        const double covarianzapooled = ((difettande-1)*primacovarianza+(altre-1)*secondacovarianza)/(taglia-2);
-        const double differenzamedieascisse = mediaprimeascisse-mediasecondeascisse;
-        const double differenzamedieordinate = mediaprimeordinate-mediasecondeordinate;
-        if (difettande < 1 || altre < 1){throw std::runtime_error("C'è una freccia che non esiste");}
-        const double statisticatest = (1.0/difettande+1.0/altre)*((differenzamedieascisse*
-            (differenzamedieascisse*varianzaordinatepooled)-differenzamedieordinate*covarianzapooled)*
-                differenzamedieascisse+(differenzamedieordinate*varianzaascissepooled-differenzamedieascisse*
-                    covarianzapooled)*differenzamedieordinate)/(varianzaascissepooled*varianzaordinatepooled-
-                        covarianzapooled*covarianzapooled);
+        const int n1 = difettande-1;
+        const int n2 = altre-1;
+        const double denominatore = n1+n2;
+        double varianzaascissepooled = (n1*varianzaascissedifettande+n2*varianzaascissealtre)/denominatore;
+        double varianzaordinatepooled = (n1*varianzaordinatedifettande+n2*varianzaordinatealtre)/denominatore;
+        double covarianzapooled = (n1*covarianzadifettande+n2*covarianzaaltre)/denominatore;
+        if (std::abs(covarianzapooled) > std::sqrt(varianzaascissepooled*varianzaordinatepooled)){covarianzapooled = std::sqrt(varianzaascissepooled*varianzaordinatepooled);}
+        double determinantepooled = varianzaascissepooled*varianzaordinatepooled-covarianzapooled*covarianzapooled;
+        if (determinantepooled < 0.000001){
+            varianzaascissepooled += 0.001;
+            varianzaordinatepooled += 0.001;
+            determinantepooled = varianzaascissepooled*varianzaordinatepooled-covarianzapooled*covarianzapooled;
+        }
+        const double inversapooled11 = varianzaordinatepooled/determinantepooled;
+        const double inversapooled22 = varianzaascissepooled/determinantepooled;
+        const double inversapooled12 = -covarianzapooled/determinantepooled;
+        const double differenzamedieascisse = mediaascissedifettande-mediaascissealtre;
+        const double differenzamedieordinate = mediaordinatedifettande-mediaordinatealtre;
+        const double formaquadratica = inversapooled11*differenzamedieascisse*differenzamedieascisse+
+            inversapooled22*differenzamedieordinate*differenzamedieordinate+2.0*inversapooled12*
+                differenzamedieordinate*differenzamedieordinate;
+        const double statisticagrezza = (n1+1)*(n2+1)/static_cast<double>(n1+n2+2)*formaquadratica;
+        const double statisticatest = 0.5*(n1+n2-1)/static_cast<double>(n1+n2)*statisticagrezza;
         if (statisticatest < soglia) {
             accettazioni++;
         }
@@ -7046,7 +7726,7 @@ int calcolabetahotellingduecampioni(const int iterazioni, const double varianzaa
 double betahotellingduecampioni(const int iterazioni, const double varianzaascisse, const double varianzaordinate,
     const double covarianza, const int taglia, const double distanza, const int numerofrecce, const double soglia) {
     if (iterazioni < 1 || varianzaascisse <= 0.0 || varianzaordinate <= 0.0){throw std::runtime_error("Errore!");}
-    if (covarianza < 0.0 || varianzaascisse*varianzaordinate-covarianza*covarianza <= 0.0 || taglia < 3 || numerofrecce < 2){throw std::runtime_error("Errore!");}
+    if (varianzaascisse*varianzaordinate-covarianza*covarianza <= 0.0 || taglia < 3 || numerofrecce < 2 || taglia/numerofrecce < 2){throw std::runtime_error("Errore!");}
     // Praticamente identica a tutte le altre funzioni che fanno metodi Monte Carlo abbiate pietà
     int numerothread = static_cast<int>(std::thread::hardware_concurrency());
     if (numerothread == 0){numerothread = 4;}
@@ -7079,8 +7759,8 @@ int calcolabetavarianzeduecampioni(const int iterazioni, const double varianza, 
     // Prepariamo i generatori di numeri casuali.
     std::random_device dispositivo;
     std::mt19937 generatore(dispositivo());
-    std::normal_distribution<> normale1(0.0, 1.0);
-    std::normal_distribution<> normale2(0.0, varianza);
+    std::normal_distribution<> normale1(0.0, std::sqrt(varianza));
+    std::normal_distribution<> normale2(0.0, 1.0);
     int accettazioni = 0;
     // Calcoliamo le taglie dei due campioni.
     const int prime = taglia/numerofrecce;
@@ -7106,7 +7786,7 @@ int calcolabetavarianzeduecampioni(const int iterazioni, const double varianza, 
             campione2[j] = elemento2;
             media2 += elemento2;
         }
-        media1 /= seconde;
+        media2 /= seconde;
         // Ora calcoliamo le varianze.
         double varianza1 = 0.0;
         for (int j = 0; j < prime; j++) {
@@ -7121,7 +7801,7 @@ int calcolabetavarianzeduecampioni(const int iterazioni, const double varianza, 
         }
         varianza2 /= seconde-1;
         // Ora eseguiamo il test.
-        if (varianza2/varianza1 < soglia){accettazioni++;}
+        if (varianza1/varianza2 < soglia){accettazioni++;}
     }
     return accettazioni;
 }
@@ -7196,23 +7876,13 @@ int calcolabetarayleigh(const int iterazioni, const double concentrazione, const
             const double u2 = uniforme(generatore);
             if (c*(2.0-c)-u2 > 0.0) {
                 const double u3 = uniforme(generatore);
-                if (u3-0.5 > 0.0) {
-                    sommacoseni += f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){sommaseni += 1.0-f*f;} else {sommaseni -= 1.0-f*f;}
-                } else {
-                    sommacoseni += f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){sommaseni -= 1.0-f*f;} else {sommaseni += 1.0-f*f;}
-                }
+                sommacoseni += f;
+                sommaseni += (u3 > 0.5 ? +1 : -1) * std::sqrt(1.0 - f*f);
                 indice++;
             } else if (std::log(c/u2)+1.0-c >= 0.0) {
                 const double u3 = uniforme(generatore);
-                if (u3-0.5 > 0.0) {
-                    sommacoseni += f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){sommaseni += 1.0-f*f;} else {sommaseni -= 1.0-f*f;}
-                } else {
-                    sommacoseni += f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){sommaseni -= 1.0-f*f;} else {sommaseni += 1.0-f*f;}
-                }
+                sommacoseni += f;
+                sommaseni += (u3 > 0.5 ? +1 : -1) * std::sqrt(1.0 - f*f);
                 indice++;
             }
         }
@@ -7323,23 +7993,13 @@ int calcolaalfaverointervalloangolomedio(const int iterazioni, const double kapp
             const double u2 = uniforme(generatore);
             if (c*(2.0-c)-u2 > 0.0) {
                 const double u3 = uniforme(generatore);
-                if (u3-0.5 > 0.0) {
-                    sommacoseni += f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){sommaseni += 1.0-f*f;} else {sommaseni -= 1.0-f*f;}
-                } else {
-                    sommacoseni += f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){sommaseni -= 1.0-f*f;} else {sommaseni += 1.0-f*f;}
-                }
+                sommacoseni += f;
+                sommaseni   += (u3 > 0.5 ? +1 : -1) * std::sqrt(1.0 - f*f);
                 indice++;
             } else if (std::log(c/u2)+1.0-c >= 0.0) {
                 const double u3 = uniforme(generatore);
-                if (u3-0.5 > 0.0) {
-                    sommacoseni += f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){sommaseni += 1.0-f*f;} else {sommaseni -= 1.0-f*f;}
-                } else {
-                    sommacoseni += f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){sommaseni -= 1.0-f*f;} else {sommaseni += 1.0-f*f;}
-                }
+                sommacoseni += f;
+                sommaseni   += (u3 > 0.5 ? +1 : -1) * std::sqrt(1.0 - f*f);
                 indice++;
             }
         }
@@ -7473,9 +8133,9 @@ std::array<double, 2> intervallokappa(const std::vector<double> &angoli, const i
     const int secondoindice = static_cast<int>(std::ceil(iterazioni-punto));
     double primoquantile;
     double secondoquantile;
-    if (primoindice < 0){primoquantile = 0.0;} else {primoquantile = stimekappa[primoindice]*peso+stimekappa[primoindice+1]*(1.0-peso);}
-    if (secondoindice > 0){secondoquantile = std::numeric_limits<double>::infinity();}
-    else {secondoquantile = stimekappa[secondoindice]*(1.0-peso)+stimekappa[secondoindice-1]*peso;}
+    if (primoindice < 0){primoquantile = 0.0;} else {primoquantile = stimekappa[primoindice]*(1.0-peso)+stimekappa[primoindice+1]*peso;}
+    if (secondoindice >= iterazioni){secondoquantile = std::numeric_limits<double>::infinity();}
+    else {secondoquantile = stimekappa[secondoindice]*peso+stimekappa[secondoindice-1]*(1.0-peso);}
     return {primoquantile, secondoquantile};
 }
 
@@ -7511,28 +8171,18 @@ int calcolaalfaverointervallokappa(const int iterazioni, const double alfanomina
             const double u2 = uniforme(generatore);
             if (c*(2.0-c)-u2 > 0.0) {
                 const double u3 = uniforme(generatore);
-                if (u3-0.5 > 0.0) {
-                    campionecoseni[indice] = f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){campioneseni[indice] = 1.0-f*f;} else {campioneseni[indice] = f*f-1.0;}
-                } else {
-                    campionecoseni[indice] = f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){campioneseni[indice] = f*f-1.0;} else {campioneseni[indice] = 1.0-f*f;}
-                }
+                campionecoseni[indice] = f;
+                campioneseni[indice] = (u3 > 0.5 ? +1 : -1) * std::sqrt(1.0 - f*f);
                 indice++;
             } else if (std::log(c/u2)+1-c >= 0) {
                 const double u3 = uniforme(generatore);
-                if (u3-0.5 > 0.0) {
-                    campionecoseni[indice] = f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){campioneseni[indice] = 1.0-f*f;} else {campioneseni[indice] = f*f-1.0;}
-                } else {
-                    campioneseni[indice] = f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){campioneseni[indice] = f*f-1.0;} else {campioneseni[indice] = 1.0-f*f;}
-                }
+                campionecoseni[indice] = f;
+                campioneseni[indice] = (u3 > 0.5 ? +1 : -1) * std::sqrt(1.0 - f*f);
                 indice++;
             }
         }
         // Sul campione così ottenuto calcoliamo un intervallo di confidenza bootstrap per \kappa.
-        std::vector<double> stimekappa(iterazioni);
+        std::vector<double> stimekappa(iterazionibootstrap);
         for (int k = 0; k < iterazionibootstrap; k++) {
             double sommacoseni = 0.0;
             double sommaseni = 0.0;
@@ -7549,18 +8199,18 @@ int calcolaalfaverointervallokappa(const int iterazioni, const double alfanomina
             else {stimakappa = 1.0/(risultante*risultante*risultante-4.0*risultante*risultante+3.0*risultante);}
             if (taglia < 15 && stimakappa < 2.0){stimakappa = stimakappa-2.0/(taglia*stimakappa);}
             if (stimakappa < 0.0){stimakappa = 0.0;}
-            stimekappa[i] = stimakappa;
+            stimekappa[k] = stimakappa;
         }
         std::sort(stimekappa.begin(), stimekappa.end());
-        const double punto = iterazioni*alfanominale/2.0;
+        const double punto = iterazionibootstrap*alfanominale/2.0;
         const double peso = punto - std::floor(punto);
         const int primoindice = static_cast<int>(std::floor(punto));
-        const int secondoindice = static_cast<int>(std::ceil(iterazioni-punto));
+        const int secondoindice = static_cast<int>(std::ceil(iterazionibootstrap-punto));
         double primoquantile;
         double secondoquantile;
-        if (primoindice < 0){primoquantile = 0.0;} else {primoquantile = stimekappa[primoindice]*peso+stimekappa[primoindice+1]*(1.0-peso);}
-        if (secondoindice > 0){secondoquantile = std::numeric_limits<double>::infinity();}
-        else {secondoquantile = stimekappa[secondoindice]*(1.0-peso)+stimekappa[secondoindice-1]*peso;}
+        if (primoindice < 0){primoquantile = 0.0;} else {primoquantile = stimekappa[primoindice]*(1.0-peso)+stimekappa[primoindice+1]*peso;}
+        if (secondoindice >= iterazionibootstrap){secondoquantile = std::numeric_limits<double>::infinity();}
+        else {secondoquantile = stimekappa[secondoindice]*peso+stimekappa[secondoindice-1]*(1.0-peso);}
         // Se l'intervallo ottenuto contiene il \kappa specificato all'inizio per la generazione del
         // campione, accettiamo l'ipotesi nulla.
         if (primoquantile <= kappa && kappa <= secondoquantile){accettazioni++;}
@@ -7656,7 +8306,7 @@ std::array<double, 4> angolomediobayesiano(const double mu0, const double a0, co
     double elbo1 = (a0-1.0)*(digammaa-logb)-b0*a/b-(n+1)*std::log(i0l)+std::log(i0bl)-
         (n+1)*std::cyl_bessel_i(1.0, lambdabarrato)/i0l*(a/b-lambdabarrato)
         +std::cyl_bessel_i(1.0, beta*lambdabarrato)/i0bl*beta*lambdabarrato*
-        (std::log(1.0/(b*lambdabarrato))+digammaa)+std::log(std::tgamma(a))+(a-1.0)*(digammaa-logb)-a/b;
+        (std::log(1.0/(b*lambdabarrato))+digammaa)+std::lgamma(a)+(a-1.0)*(digammaa-logb)-a/b;
     // Per ogni iterazione (e ci fermiamo comunque dopo 200):
     for (int iterazione = 0; iterazione < 200; iterazione++){
         // Calcoliamo \bar{\lambda} e poi le funzioni di Bessel necessarie.
@@ -7684,7 +8334,7 @@ std::array<double, 4> angolomediobayesiano(const double mu0, const double a0, co
         logb = std::log(b);
         double elbo2 = (a0-1.0)*(digammaa-logb)-b0*a/b-(n+1)*std::log(i0l)+std::log(i0bl)-
             (n+1.0)*i1l/i0l*(a/b-lambdabarrato)+i1bl/i0bl*beta*lambdabarrato*
-                (std::log(1.0/(b*lambdabarrato))+digammaa)+std::log(std::tgamma(a))+(a-1.0)*(digammaa-logb)-a/b;
+                (std::log(1.0/(b*lambdabarrato))+digammaa)+std::lgamma(a)+(a-1.0)*(digammaa-logb)-a/b;
         // Se l'ELBO nuovo è sufficientemente vicino al precedente, dichiariamo raggiunta la convergenza.
         // Altrimenti passiamo alla prossima iterazione.
         if (elbo2-elbo1 < 0.0001){break;}
@@ -7713,7 +8363,7 @@ std::array<double, 4> angolomediobayesiano(const double mu0, const double a0, co
 // Componenti: numero di componenti della mistura.
 // Angoli: vettore degli angoli del dataset in radianti.
 // N: taglia del campione.
-std::array<std::vector<double>, 6> misturevonmisesvariazionali(const std::vector<double> &alfa0,
+std::array<std::vector<double>, 7> misturevonmisesvariazionali(const std::vector<double> &alfa0,
     const std::vector<double> &beta0, const std::vector<double> &m0, const std::vector<double> &a0,
     const std::vector<double> &b0, const int componenti, std::vector<double> &angoli, const int n) {
     if (alfa0.size() != componenti || beta0.size() != componenti || m0.size() != componenti || a0.size() != componenti || b0.size() != componenti){throw std::runtime_error("Numero di parametri errato");}
@@ -7775,7 +8425,7 @@ std::array<std::vector<double>, 6> misturevonmisesvariazionali(const std::vector
         }
         std::vector<double> nuovicentroidi(componenti);
         for (int i = 0; i < componenti; i++) {
-            nuovicentroidi[i] = std::atan2(seni[i]/n, coseni[i]/n);
+            nuovicentroidi[i] = std::atan2(senicentroidi[i]/n, cosenicentroidi[i]/n);
         }
         // Se i centroidi ottenuti a quest'iterazione sono tutti distanti massimo 0.01 radianti
         // dai precedenti, dichiariamo la convergenza e smettiamo.
@@ -7803,7 +8453,7 @@ std::array<std::vector<double>, 6> misturevonmisesvariazionali(const std::vector
                 centroide = j;
             }
         }
-        xi[n][centroide] = 1.0;
+        xi[i][centroide] = 1.0;
     }
     // Prima di continuare abbiamo bisogno della funzione digamma di \sum_k\alpha_{0k}.
     double sommaalfa0 = 0.0;
@@ -7962,7 +8612,7 @@ std::array<std::vector<double>, 6> misturevonmisesvariazionali(const std::vector
         const double aa2 = aa*aa;
         const double aa4 = aa2*aa2;
         digammasommaalfa += std::log(sommaalfa)-0.5*aa-aa2/12.0+aa4/120.0-aa4*aa2/252.0;
-        elbo2 -= std::log(std::tgamma(conservasommaalfa)/std::tgamma(conservasommaalfa0));
+        elbo2 -= std::lgamma(conservasommaalfa)-std::lgamma(conservasommaalfa0);
         for (int i = 0; i < componenti; i++) {
             const double alfacorrente = alfa[i];
             const double alfa0corrente = alfa0[i];
@@ -7978,7 +8628,7 @@ std::array<std::vector<double>, 6> misturevonmisesvariazionali(const std::vector
             digammaalfacorrente += std::log(alfa_corrente)-0.5*alfaalfa-alfaalfa2/12.0+alfaalfa4/120.0-
                 alfaalfa4*alfaalfa2/252.0;
             digammaalfa[i] = digammaalfacorrente;
-            elbo2 += std::log(std::tgamma(alfacorrente)/std::tgamma(alfa0corrente))-
+            elbo2 += std::lgamma(alfacorrente)-std::lgamma(alfa0corrente)-
                 (alfacorrente-alfa0corrente)*(digammaalfacorrente-digammasommaalfa);
         }
         // Adesso, per ogni componente, dobbiamo sottrarre la somma della divergenza di Kullback-Leibler
@@ -8015,7 +8665,7 @@ std::array<std::vector<double>, 6> misturevonmisesvariazionali(const std::vector
             const double ilambda = std::cyl_bessel_i(0.0, lambdacorrente);
             const double ibeta0 = std::cyl_bessel_i(0.0, beta0corrente*lambdacorrente);
             const double ibeta = std::cyl_bessel_i(0.0, betacorrente*lambdacorrente);
-            elbo2 -= a0corrente*std::log(bcorrente/b0corrente)-std::log(std::tgamma(acorrente)/std::tgamma(a0corrente))+
+            elbo2 -= a0corrente*std::log(bcorrente/b0corrente)-std::lgamma(acorrente)-std::lgamma(a0corrente)+
                 (acorrente-a0corrente)*digammaacorrente+acorrente*(b0corrente/bcorrente-1.0)+(kq-beta0corrente*
                 a0corrente/b0corrente*(cosenim0[i]*cosenim[i]+senim0[i]*senim[i]))*std::cyl_bessel_i(1.0, kq)/
                     std::cyl_bessel_i(0.0, kq)-(a0corrente-1.0)*std::log(acorrente/bcorrente)-b0corrente*acorrente/
@@ -8047,12 +8697,12 @@ std::array<std::vector<double>, 6> misturevonmisesvariazionali(const std::vector
     // Terminato l'algoritmo, abbiamo le nostre stime dei parametri; ora calcoliamo il BIC
     // in modo da poter scegliere in seguito il numero di componenti. Lo poniamo dentro un vettore
     // monoelemento in modo da avere una function signature pulita.
-    std::vector<double> contenitoreBIC(1);
     double logverosimiglianza = 0.0;
     double sommaalfafinale = 0.0;
     for (int i = 0; i < componenti; i++) {
         sommaalfafinale += alfa[i];
     }
+    if (sommaalfafinale < 0.00001){sommaalfafinale += 0.00001;}
     for (int i = 0; i < n; i++) {
         long double sommatoriainterna = 0.0;
         for (int j = 0; j < componenti; j++) {
@@ -8062,9 +8712,36 @@ std::array<std::vector<double>, 6> misturevonmisesvariazionali(const std::vector
         }
         logverosimiglianza += static_cast<double>(std::log(sommatoriainterna));
     }
+    std::vector<double> elnrhon(n);
+    for (int i = 0; i < n; i++) {
+        const std::vector<double>& lnrhoncorrente = lnrhonk[i];
+        double lnrhonsingolo = 0.0;
+        for (int j = 0; j < componenti; j++) {
+            lnrhonsingolo += std::exp(lnrhoncorrente[j]);
+        }
+        elnrhon[i] = lnrhonsingolo;
+    }
+    for (int i = 0; i < n; i++) {
+        const std::vector<double>& lnrhonkcorrente = lnrhonk[i];
+        double lnrhoncorrente = elnrhon[i];
+        for (int j = 0; j < componenti; j++) {
+            if (lnrhoncorrente < 0.000001){lnrhoncorrente += 0.000001;}
+            xinuovi[j][i] = std::exp(lnrhonkcorrente[j])/lnrhoncorrente;
+        }
+    }
+    std::vector<double> assegnazioni(n);
+    for (int i = 0; i < n; i++){
+        int componentemassima = 0;
+        double ximassimo = xinuovi[0][i];
+        for (int j = 1; j < componenti; j++) {
+            if (xinuovi[j][i] < ximassimo){componentemassima = j; ximassimo = xinuovi[j][i];}
+        }
+        assegnazioni[i] = componentemassima;
+    }
+    std::vector<double> contenitoreBIC(1);
     // Notare che per ogni componente ci sono sei parametri: due coordinate di m, beta, a, b e \alpha.
     contenitoreBIC[0] = -2.0*logverosimiglianza+6.0*componenti*std::log(n);
-    return {m, beta, a, b, alfa, contenitoreBIC};
+    return {m, beta, a, b, alfa, contenitoreBIC, assegnazioni};
 }
 
 
@@ -8130,7 +8807,7 @@ int calcolabetaaffidabilitavonmises(const int iterazioni, const bool uniforme, c
     int accettazioni = 0;
     std::random_device dispositivo;
     std::mt19937 generatore(dispositivo());
-    // Se l'ipotesi alternativa (vera) è che la distribuzione sia normale:
+    // Se l'ipotesi alternativa (vera) è che la distribuzione sia uniforme:
     if (uniforme) {
         std::uniform_real_distribution<> distribuzione(-pigreco, pigreco);
         // Per ogni iterazione:
@@ -8213,47 +8890,31 @@ int calcolabetaaffidabilitavonmises(const int iterazioni, const bool uniforme, c
                     if (c*(2.0-c)-u2 > 0.0){
                         const double u3 = distribuzione(generatore);
                         if (u3-0.5 > 0.0) {
-                            campione[j] = std::acos(f)+media;
-                            if (std::fmod(f, 2.0*pigreco) < pigreco){
-                                sommacoseni += f*cosenomedia-(1.0-f*f)*senomedia;
-                                sommaseni += (1.0-f*f)*cosenomedia+f*senomedia;
-                            } else {
-                                sommacoseni += f*cosenomedia-(f*f-1.0)*senomedia;
-                                sommaseni += (f*f-1.0)*cosenomedia+f*senomedia;
-                            }
+                            const double angolo = std::acos(f)+media;
+                            campione[j] = angolo;
+                            sommacoseni += std::cos(angolo);
+                            sommaseni   += std::sin(angolo);
                             estraendo = false;
                         } else {
-                            campione[j] = -std::acos(f)+media;
-                            if (std::fmod(f, 2.0*pigreco) < pigreco){
-                                sommacoseni += f*cosenomedia-(1.0-f*f)*senomedia;
-                                sommaseni += (1.0-f*f)*cosenomedia+f*senomedia;
-                            } else {
-                                sommacoseni += f*cosenomedia-(f*f-1.0)*senomedia;
-                                sommaseni += (f*f-1.0)*cosenomedia+f*senomedia;
-                            }
+                            const double angolo = -std::acos(f)+media;
+                            campione[j] = angolo;
+                            sommacoseni += std::cos(angolo);
+                            sommaseni   += std::sin(angolo);
                             estraendo = false;
                         }
                     } else if (std::log(c/u2)+1.0-c >= 0.0) {
                         const double u3 = distribuzione(generatore);
                         if (u3-0.5 > 0.0) {
-                            campione[j] = std::acos(f)+media;
-                            if (std::fmod(f, 2.0*pigreco) < pigreco){
-                                sommacoseni += f*cosenomedia-(1.0-f*f)*senomedia;
-                                sommaseni += (1.0-f*f)*cosenomedia+f*senomedia;
-                            } else {
-                                sommacoseni += f*cosenomedia-(f*f-1.0)*senomedia;
-                                sommaseni += (f*f-1.0)*cosenomedia+f*senomedia;
-                            }
+                            const double angolo = std::acos(f)+media;
+                            campione[j] = angolo;
+                            sommacoseni += std::cos(angolo);
+                            sommaseni   += std::sin(angolo);
                             estraendo = false;
                         } else {
-                            campione[j] = -std::acos(f)+media;
-                            if (std::fmod(f, 2.0*pigreco) < pigreco){
-                                sommacoseni += f*cosenomedia-(1.0-f*f)*senomedia;
-                                sommaseni += (1.0-f*f)*cosenomedia+f*senomedia;
-                            } else {
-                                sommacoseni += f*cosenomedia-(f*f-1.0)*senomedia;
-                                sommaseni += (f*f-1.0)*cosenomedia+f*senomedia;
-                            }
+                            const double angolo = -std::acos(f)+media;
+                            campione[j] = angolo;
+                            sommacoseni += std::cos(angolo);
+                            sommaseni   += std::sin(angolo);
                             estraendo = false;
                         }
                     }
@@ -8280,8 +8941,8 @@ int calcolabetaaffidabilitavonmises(const int iterazioni, const bool uniforme, c
             double sc = 0.0;
             double ss = 0.0;
             for (int j = 0; j < taglia; j++) {
-                sc += std::cos(2.0*(campione[i]-angolomedio));
-                ss += std::sin(2.0*(campione[i]-angolomedio));
+                sc += std::cos(2.0*(campione[j]-angolomedio));
+                ss += std::sin(2.0*(campione[j]-angolomedio));
             }
             sc -= taglia*i1/i0;
             // E adesso passiamo a v_c e v_s.
@@ -8289,7 +8950,7 @@ int calcolabetaaffidabilitavonmises(const int iterazioni, const bool uniforme, c
             const double pezzonumeratorevs = i0-i3;
             const double vc = (i0*i0+i0*i4-2.0*i2*i2)/(2.0*i0*i0)-numeratorevc*numeratorevc/(2.0*i0*i0*(i0*i0+i0*i1-2.0*i1*i1));
             const double vs = ((i0-i4)*(i0-i2)-pezzonumeratorevs*pezzonumeratorevs)/(2.0*i0*(i0-i2));
-            if (sc*sc/vc+ss*ss/vs < soglia){accettazioni++;}
+            if (sc*sc/vc+ss*ss/vs <= soglia){accettazioni++;}
         }
     }
     return accettazioni;
@@ -8358,27 +9019,13 @@ int calcolaalfaveroaffidabilitavonmises(const int iterazioni, const double kappa
             const double u2 = distribuzione(generatore);
             if (c*(2.0-c)-u2 > 0.0){
                 const double u3 = distribuzione(generatore);
-                if (u3-0.5 > 0.0) {
-                    campione[indice] = std::acos(f);
-                    sommacoseni += f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){sommaseni += 1.0-f*f;} else {sommaseni += f*f-1.0;}
-                } else {
-                    campione[indice] = -std::acos(f);
-                    sommacoseni += f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){sommaseni += f*f-1.0;} else {sommaseni += 1.0-f*f;}
-                }
+                sommacoseni += f;
+                sommaseni   += (u3 > 0.5 ? +1 : -1) * std::sqrt(1.0 - f*f);
                 indice++;
             } else if (std::log(c/u2)+1.0-c >= 0.0) {
                 const double u3 = distribuzione(generatore);
-                if (u3-0.5 > 0.0) {
-                    campione[indice] = std::acos(f);
-                    sommacoseni += f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){sommaseni += 1.0-f*f;} else {sommaseni += f*f-1.0;}
-                } else {
-                    campione[indice] = -std::acos(f);
-                    sommacoseni += f;
-                    if (std::fmod(f, 2.0*pigreco) < pigreco){sommaseni += f*f-1.0;} else {sommaseni += 1.0-f*f;}
-                }
+                sommacoseni += f;
+                sommaseni   += (u3 > 0.5 ? +1 : -1) * std::sqrt(1.0 - f*f);
                 indice++;
             }
         }
@@ -8402,8 +9049,8 @@ int calcolaalfaveroaffidabilitavonmises(const int iterazioni, const double kappa
         double sc = 0.0;
         double ss = 0.0;
         for (int j = 0; j < taglia; j++) {
-            sc += std::cos(2.0*(campione[i]-angolomedio));
-            ss += std::sin(2.0*(campione[i]-angolomedio));
+            sc += std::cos(2.0*(campione[j]-angolomedio));
+            ss += std::sin(2.0*(campione[j]-angolomedio));
         }
         sc -= taglia*i1/i0;
         // E adesso passiamo a v_c e v_s.
@@ -8448,33 +9095,1164 @@ double alfaveroaffidabilitavonmises(const int iterazioni, const double kappa, co
     return 1.0-static_cast<double>(accettazioni)/iterazioni;
 }
 
-// FINO A QUI È STATO TUTTO COMPILATO CORRETTAMENTE
+void calcolabootstrapstazionariohotelling(std::vector<double> &statistiche, const int thread, const int iterazioni, const int aggiuntive,
+    const int taglia, const std::vector<double> &ascisse, const std::vector<double> &ordinate, const double p,
+    const double mediaascisse, const double mediaordinate){
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    std::geometric_distribution<> geometrica(p);
+    std::uniform_int_distribution<> uniforme(0, taglia-1);
+    for (int i = 0; i < iterazioni+aggiuntive; i++){
+        std::vector<double> campioneascisse(taglia);
+        std::vector<double> campioneordinate(taglia);
+        int indice = 0;
+        while (true){
+            const int inizioblocco = uniforme(generatore);
+            const int fineblocco = inizioblocco+geometrica(generatore)+1;
+            for (int j = inizioblocco; j < fineblocco; j++) {
+                const int posizione = j % taglia;
+                campioneascisse[indice] = ascisse[posizione];
+                campioneordinate[indice] = ordinate[posizione];
+                indice++;
+                if (indice >= taglia){break;}
+            }
+            if (indice >= taglia){break;}
+        }
+        double mba = 0.0;
+        double mbo = 0.0;
+        for (int j = 0; j < taglia; j++) {
+            mba += campioneascisse[j];
+            mbo += campioneordinate[j];
+        }
+        mba /= taglia;
+        mbo /= taglia;
+        double vba = 0.0;
+        double vbo = 0.0;
+        double cb = 0.0;
+        for (int j = 0; j < taglia; j++) {
+            const double d1 = campioneascisse[j]-mba;
+            const double d2 = campioneordinate[j]-mbo;
+            vba += d1*d1;
+            vbo += d2*d2;
+            cb += d1*d2;
+        }
+        vba /= taglia-1;
+        vbo /= taglia-1;
+        cb /= taglia-1;
+        double determinante = vba*vbo-cb*cb;
+        if (determinante < 0.000000001){
+            vba += 0.000001;
+            vbo += 0.000001;
+            determinante = vba*vbo-cb*cb;
+        }
+        const double inversa11 = vbo/determinante;
+        const double inversa22 = vba/determinante;
+        const double inversa12 = -cb/determinante;
+        const double distanzaascisse = mediaascisse-mba;
+        const double distanzaordinate = mediaordinate-mbo;
+        statistiche[thread*iterazioni+i] = inversa11*distanzaascisse*distanzaascisse+2.0*inversa12*
+            distanzaascisse*distanzaordinate+inversa22*distanzaordinate*distanzaordinate;
+    }
+}
+
+double bootstrapstazionariohotelling(const int taglia, const std::vector<double> ascisse, const std::vector<double> ordinate,
+    const double p, const int B, const double mediaascisse, const double mediaordinate, const double alfa){
+    if (taglia < 3){throw std::runtime_error("Dataset troppo piccolo");}
+    if (ascisse.size() != taglia || ordinate.size() != taglia){throw std::runtime_error("Dataset sbagliato");}
+    if (p <= 0 || p >= 1){throw std::runtime_error("Probabilità sbagliata");}
+    if (B < 1){throw std::runtime_error("Iterazioni insufficienti");}
+    if (alfa <= 0.0 || alfa >= 1.0){throw std::runtime_error("Alfa sbagliato");}
+    int numerothread = static_cast<int>(std::thread::hardware_concurrency());
+    if (numerothread == 0){numerothread = 4;}
+    std::vector<std::thread> thread(numerothread);
+    const int volteperthread = B/numerothread;
+    const int iterazionirestanti = B%numerothread;
+    std::vector<double> statistiche(B, 0.0);
+    for (int i = 0; i < numerothread - 1; i++){
+        int indicethread = i;
+        thread[i] = std::thread([=, &statistiche](){
+            calcolabootstrapstazionariohotelling(statistiche, indicethread, volteperthread, 0, taglia,
+                ascisse, ordinate, p, mediaascisse, mediaordinate);
+        });
+    }
+    thread[numerothread - 1] = std::thread([=, &statistiche](){
+        calcolabootstrapstazionariohotelling(statistiche, numerothread-1, volteperthread, iterazionirestanti,
+            taglia, ascisse, ordinate, p, mediaascisse, mediaordinate);
+    });
+    for (auto& t : thread){
+        t.join();
+    }
+    std::sort(statistiche.begin(), statistiche.end());
+    const double indice = B*(1.0-alfa);
+    const double peso = indice-std::floor(indice);
+    if (indice >= B){return statistiche[B-1];}
+    if (indice < 1.0){return statistiche[0];}
+    const int indiceintero = static_cast<int>(indice);
+    return (1.0-peso)*statistiche[indiceintero-1]+peso*statistiche[indiceintero];
+}
+
+
+double alfaverobootstrapstazionariohotelling(const int taglia, const double varianzaascisse,
+    const double varianzaordinate, const double p, const int B, const double alfa, const int volte) {
+    if (volte <= 0 || varianzaascisse <= 0.0 || varianzaordinate <= 0.0){throw std::runtime_error("Errore");}
+    int accettazioni = 0;
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    std::normal_distribution<> normaleascisse(0.0, varianzaascisse);
+    std::normal_distribution<> normaleordinate(0.0, varianzaordinate);
+    for (int i = 0; i < volte; i++) {
+        std::vector<double> ascisse(taglia);
+        std::vector<double> ordinate(taglia);
+        double mediaascisse = 0.0;
+        double mediaordinate = 0.0;
+        for (int j = 0; j < taglia; j++) {
+            const double ascissa = normaleascisse(generatore);
+            const double ordinata = normaleordinate(generatore);
+            mediaascisse += ascissa;
+            mediaordinate += ordinata;
+            ascisse[j] = ascissa;
+            ordinate[j] = ordinata;
+        }
+        mediaascisse /= taglia;
+        mediaordinate /= taglia;
+        double varianzaascissecampionaria = 0.0;
+        double varianzaordinatecampionaria = 0.0;
+        double covarianza = 0.0;
+        for (int j = 0; j < taglia; j++) {
+            const double distanzaascisse = ascisse[j]-mediaascisse;
+            const double distanzaordinate = ordinate[j]-mediaordinate;
+            varianzaascissecampionaria += distanzaascisse*distanzaascisse;
+            varianzaordinatecampionaria += distanzaordinate*distanzaordinate;
+            covarianza += distanzaascisse*distanzaordinate;
+        }
+        varianzaascissecampionaria /= taglia-1;
+        varianzaordinatecampionaria /= taglia-1;
+        covarianza /= taglia-1;
+        double determinante = varianzaascissecampionaria*varianzaordinatecampionaria-covarianza*covarianza;
+        if (determinante < 0.00000001) {
+            varianzaascissecampionaria += 0.0001;
+            varianzaordinatecampionaria += 0.0001;
+            determinante = varianzaascissecampionaria*varianzaordinatecampionaria-covarianza*covarianza;
+        }
+        const double soglia = bootstrapstazionariohotelling(taglia, ascisse, ordinate, p, B, mediaascisse, mediaordinate, alfa);
+        const double formaquadratica = (varianzaordinatecampionaria*mediaascisse*mediaascisse-2.0*covarianza*mediaascisse*
+            mediaordinate+varianzaascissecampionaria*mediaordinate*mediaordinate)/determinante;
+        if (formaquadratica <= soglia){accettazioni++;}
+    }
+    return 1.0-static_cast<double>(accettazioni)/volte;
+}
+
+
+void calcolabootstrapmobilehotelling(std::vector<double> &statistiche, const int thread, const int iterazioni, const int aggiuntive,
+    const int taglia, const std::vector<double> &ascisse, const std::vector<double> &ordinate, const int b,
+    const double mediaascisse, const double mediaordinate){
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    const int k = taglia/b+1;
+    const int eccessiva = b*k;
+    std::uniform_int_distribution<> uniforme(0, taglia-b);
+    for (int i = 0; i < iterazioni+aggiuntive; i++){
+        std::vector<double> campioneascisse(eccessiva);
+        std::vector<double> campioneordinate(eccessiva);
+        for (int j = 0; j < k; j++) {
+            const int inizioblocco = uniforme(generatore);
+            for (int l = 0; l < b; l++) {
+                campioneascisse[b*j+l] = ascisse[inizioblocco+l];
+                campioneordinate[b*j+l] = ordinate[inizioblocco+l];
+            }
+        }
+        double mba = 0.0;
+        double mbo = 0.0;
+        for (int j = 0; j < taglia; j++) {
+            mba += campioneascisse[j];
+            mbo += campioneordinate[j];
+        }
+        mba /= taglia;
+        mbo /= taglia;
+        double vba = 0.0;
+        double vbo = 0.0;
+        double cb = 0.0;
+        for (int j = 0; j < taglia; j++) {
+            const double d1 = campioneascisse[j]-mba;
+            const double d2 = campioneordinate[j]-mbo;
+            vba += d1*d1;
+            vbo += d2*d2;
+            cb += d1*d2;
+        }
+        vba /= taglia-1;
+        vbo /= taglia-1;
+        cb /= taglia-1;
+        double determinante = vba*vbo-cb*cb;
+        if (determinante < 0.000000001){
+            vba += 0.000001;
+            vbo += 0.000001;
+            determinante = vba*vbo-cb*cb;
+        }
+        const double inversa11 = vbo/determinante;
+        const double inversa22 = vba/determinante;
+        const double inversa12 = -cb/determinante;
+        const double distanzaascisse = mediaascisse-mba;
+        const double distanzaordinate = mediaordinate-mbo;
+        statistiche[thread*iterazioni+i] = inversa11*distanzaascisse*distanzaascisse+2.0*inversa12*
+            distanzaascisse*distanzaordinate+inversa22*distanzaordinate*distanzaordinate;
+    }
+}
+
+
+double bootstrapmobilehotelling(const int taglia, const std::vector<double> ascisse, const std::vector<double> ordinate,
+    const int b, const int B, const double mediaascisse, const double mediaordinate, const double alfa){
+    if (taglia < 3){throw std::runtime_error("Dataset troppo piccolo");}
+    if (ascisse.size() != taglia || ordinate.size() != taglia){throw std::runtime_error("Dataset sbagliato");}
+    if (b <= 0 || b >= taglia){throw std::runtime_error("Lunghezza dei blocchi sbagliata");}
+    if (B < 1){throw std::runtime_error("Iterazioni insufficienti");}
+    if (alfa <= 0.0 || alfa >= 1.0){throw std::runtime_error("Alfa sbagliato");}
+    int numerothread = static_cast<int>(std::thread::hardware_concurrency());
+    if (numerothread == 0){numerothread = 4;}
+    std::vector<std::thread> thread(numerothread);
+    const int volteperthread = B/numerothread;
+    const int iterazionirestanti = B%numerothread;
+    std::vector<double> statistiche(B, 0.0);
+    for (int i = 0; i < numerothread - 1; i++){
+        int indicethread = i;
+        thread[i] = std::thread([=, &statistiche](){
+            calcolabootstrapmobilehotelling(statistiche, indicethread, volteperthread, 0, taglia,
+                ascisse, ordinate, b, mediaascisse, mediaordinate);
+        });
+    }
+    thread[numerothread - 1] = std::thread([=, &statistiche](){
+        calcolabootstrapmobilehotelling(statistiche, numerothread-1, volteperthread, iterazionirestanti,
+            taglia, ascisse, ordinate, b, mediaascisse, mediaordinate);
+    });
+    for (auto& t : thread){
+        t.join();
+    }
+    std::sort(statistiche.begin(), statistiche.end());
+    const double indice = B*(1.0-alfa);
+    const double peso = indice-std::floor(indice);
+    if (indice >= B){return statistiche[B-1];}
+    if (indice < 1.0){return statistiche[0];}
+    const int indiceintero = static_cast<int>(indice);
+    return (1.0-peso)*statistiche[indiceintero-1]+peso*statistiche[indiceintero];
+}
+
+
+double alfaverobootstrapmobilehotelling(const int taglia, const double varianzaascisse,
+    const double varianzaordinate, const int b, const int B, const double alfa, const int volte) {
+    if (volte <= 0 || varianzaascisse <= 0.0 || varianzaordinate <= 0.0){throw std::runtime_error("Errore");}
+    int accettazioni = 0;
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    std::normal_distribution<> normaleascisse(0.0, varianzaascisse);
+    std::normal_distribution<> normaleordinate(0.0, varianzaordinate);
+    for (int i = 0; i < volte; i++){
+        std::vector<double> ascisse(taglia);
+        std::vector<double> ordinate(taglia);
+        double mediaascisse = 0.0;
+        double mediaordinate = 0.0;
+        for (int j = 0; j < taglia; j++) {
+            const double ascissa = normaleascisse(generatore);
+            const double ordinata = normaleordinate(generatore);
+            mediaascisse += ascissa;
+            mediaordinate += ordinata;
+            ascisse[j] = ascissa;
+            ordinate[j] = ordinata;
+        }
+        mediaascisse /= taglia;
+        mediaordinate /= taglia;
+        double varianzaascissecampionaria = 0.0;
+        double varianzaordinatecampionaria = 0.0;
+        double covarianza = 0.0;
+        for (int j = 0; j < taglia; j++) {
+            const double distanzaascisse = ascisse[j]-mediaascisse;
+            const double distanzaordinate = ordinate[j]-mediaordinate;
+            varianzaascissecampionaria += distanzaascisse*distanzaascisse;
+            varianzaordinatecampionaria += distanzaordinate*distanzaordinate;
+            covarianza += distanzaascisse*distanzaordinate;
+        }
+        varianzaascissecampionaria /= taglia-1;
+        varianzaordinatecampionaria /= taglia-1;
+        covarianza /= taglia-1;
+        double determinante = varianzaascissecampionaria*varianzaordinatecampionaria-covarianza*covarianza;
+        if (determinante < 0.00000001) {
+            varianzaascissecampionaria += 0.0001;
+            varianzaordinatecampionaria += 0.0001;
+            determinante = varianzaascissecampionaria*varianzaordinatecampionaria-covarianza*covarianza;
+        }
+        const double soglia = bootstrapmobilehotelling(taglia, ascisse, ordinate, b, B, mediaascisse, mediaordinate, alfa);
+        const double formaquadratica = (varianzaordinatecampionaria*mediaascisse*mediaascisse-2.0*covarianza*mediaascisse*
+            mediaordinate+varianzaascissecampionaria*mediaordinate*mediaordinate)/determinante;
+        if (formaquadratica <= soglia){accettazioni++;}
+    }
+    return 1.0-static_cast<double>(accettazioni)/volte;
+}
+
+
+void calcolabootstrapnorme(std::vector<double> &statistiche, const int thread, const int iterazioni, const int aggiuntive,
+    const int taglia, const std::vector<double> &norme){
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    std::uniform_int_distribution<> uniforme(0, taglia-1);
+    for (int i = 0; i < iterazioni+aggiuntive; i++){
+        double media = 0.0;
+        for (int j = 0; j < taglia; j++) {
+            media += norme[uniforme(generatore)];
+        }
+        statistiche[thread*iterazioni+i] = media/taglia;
+    }
+}
+
+
+std::array<double, 2> bootstrapnorme(const int taglia, const std::vector<double> norme,
+    const int B, const double alfa){
+    if (taglia < 3){throw std::runtime_error("Dataset troppo piccolo");}
+    if (norme.size() != taglia){throw std::runtime_error("Dataset sbagliato");}
+    if (B < 1){throw std::runtime_error("Iterazioni insufficienti");}
+    if (alfa <= 0.0 || alfa >= 1.0){throw std::runtime_error("Alfa sbagliato");}
+    int numerothread = static_cast<int>(std::thread::hardware_concurrency());
+    if (numerothread == 0){numerothread = 4;}
+    std::vector<std::thread> thread(numerothread);
+    const int volteperthread = B/numerothread;
+    const int iterazionirestanti = B%numerothread;
+    std::vector<double> statistiche(B, 0.0);
+    for (int i = 0; i < numerothread - 1; i++){
+        int indicethread = i;
+        thread[i] = std::thread([=, &statistiche](){
+            calcolabootstrapnorme(statistiche, indicethread, volteperthread, 0, taglia, norme);
+        });
+    }
+    thread[numerothread - 1] = std::thread([=, &statistiche](){
+        calcolabootstrapnorme(statistiche, numerothread-1, volteperthread, iterazionirestanti,
+            taglia, norme);
+    });
+    for (auto& t : thread){
+        t.join();
+    }
+    std::sort(statistiche.begin(), statistiche.end());
+    std::array<double, 2> intervallo = {0.0, 0.0};
+    const double indice1 = B*alfa/2.0;
+    const double indice2 = B*(1.0-alfa/2.0);
+    const double peso1 = indice1-std::floor(indice1);
+    const double peso2 = indice2-std::floor(indice2);
+    const int indiceintero1 = static_cast<int>(indice1);
+    const int indiceintero2 = static_cast<int>(indice2);
+    if (indice2 >= B){intervallo[1] = statistiche[B-1];} else {intervallo[1] = (1.0-peso2)*statistiche[indiceintero2-1]+peso2*statistiche[indiceintero2];}
+    if (indice1 < 1.0){intervallo[0] = statistiche[0];} else {intervallo[0] = (1.0-peso1)*statistiche[indiceintero1-1]+peso1*statistiche[indiceintero1];}
+    return intervallo;
+}
+
+
+double alfaverobootstrapnorme(const int taglia, const double varianza, const int B, const double alfa, const int volte) {
+    if (volte <= 0 || varianza <= 0.0){throw std::runtime_error("Errore");}
+    int accettazioni = 0;
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    std::normal_distribution<> normale(0.0, std::sqrt(varianza));
+    for (int i = 0; i < volte; i++){
+        std::vector<double> norme(taglia);
+        double media = 0.0;
+        for (int j = 0; j < taglia; j++) {
+            const double norma = normale(generatore);
+            media += norma;
+            norme[j] = norma;
+        }
+        media /= taglia;
+        const std::array<double, 2> stimaintervallare = bootstrapnorme(taglia, norme, B, alfa);
+        if (0.0 > stimaintervallare[0] && 0.0 < stimaintervallare[1]){accettazioni++;}
+    }
+    return 1.0-static_cast<double>(accettazioni)/volte;
+}
+
+
+std::array<double, 5> detrenda(std::vector<double> ascisse, std::vector<double> ordinate,
+    const double betaa1, const double betaa0, const double betao1, const double betao0, const int n){
+    if (ascisse.size() != n || ordinate.size() != n || n < 3){throw std::runtime_error("Errore");}
+    for (int i = 0; i < n; i++){
+        ascisse[i] -= betaa1*ascisse[i]+betaa0;
+        ordinate[i] -= betao1+ordinate[i]+betao0;
+    }
+    double mediaa = 0.0;
+    double mediao = 0.0;
+    for (int i = 0; i < n; i++){mediaa += ascisse[i]; mediao += ordinate[i];}
+    mediaa /= n;
+    mediao /= n;
+    double varianzaa = 0.0;
+    double varianzao = 0.0;
+    double covarianza = 0.0;
+    for (int i = 0; i < n; i++) {
+        const double d1 = ascisse[i]-mediaa;
+        const double d2 = ordinate[i] -mediao;
+        varianzaa += d1*d1;
+        varianzao += d2*d2;
+        covarianza += d1*d2;
+    }
+    return {varianzaa/(n-1), varianzao/(n-1), covarianza/(n-1), mediaa, mediao};
+}
+
+
+void calcolabootstrapttest(const std::vector<double> norme, const double mu0, const int iterazioni, const int aggiuntive,
+    const int n, std::vector<double> &statistiche, const int thread) {
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    std::uniform_int_distribution<> indice(0, n-1);
+    for (int i = 0; i < iterazioni+aggiuntive; i++) {
+        std::vector<double> campione(n);
+        double media = 0.0;
+        for (int j = 0; j < n; j++) {
+            const double norma = norme[indice(generatore)];
+            campione[j] = norma;
+            media += norma;
+        }
+        media /= n;
+        double varianza = 0.0;
+        for (int j = 0; j < n; j++) {
+            const double differenza = campione[j]-media;
+            varianza += differenza*differenza;
+        }
+        varianza /= n-1;
+        statistiche[iterazioni*thread+i] = (media-mu0)*std::sqrt(n/varianza);
+    }
+}
+
+
+bool bootstrapttest(const std::vector<double> norme, const char nulla, const int B, const double mu0, const int n, const double alfa) {
+    if (norme.size() != n || B < 1 || n < 2 || alfa <= 0.0 || alfa >= 1.0){throw std::runtime_error("Errore");}
+    if (nulla != '<' && nulla != '=' && nulla != '>'){throw std::runtime_error("Errore");}
+    double media = 0.0;
+    for (int i = 0; i < n; i++){media += norme[i];}
+    media /= n;
+    double varianza = 0.0;
+    for (int i = 0; i < n; i++){const double d = norme[i]-media; varianza += d*d;}
+    varianza /= n-1;
+    const double statistica = (media-mu0)*std::sqrt(n/varianza);
+    int numerothread = static_cast<int>(std::thread::hardware_concurrency());
+    if (numerothread == 0){numerothread = 4;}
+    std::vector<std::thread> thread(numerothread);
+    const int volteperthread = B/numerothread;
+    const int iterazionirestanti = B%numerothread;
+    std::vector<double> statistiche(B, 0.0);
+    for (int i = 0; i < numerothread - 1; i++){
+        int indicethread = i;
+        thread[i] = std::thread([=, &statistiche](){
+            calcolabootstrapttest(norme, media, volteperthread, 0, n, statistiche, indicethread);
+        });
+    }
+    thread[numerothread - 1] = std::thread([=, &statistiche](){
+        calcolabootstrapttest(norme, media, volteperthread, iterazionirestanti, n, statistiche, numerothread-1);
+    });
+    for (auto& t : thread){
+        t.join();
+    }
+    std::sort(statistiche.begin(), statistiche.end());
+    if (nulla == '<') {
+        double indice = B*(1.0-alfa);
+        const double peso = indice-std::floor(indice);
+        if (indice < 1.0){indice = 1.0;}
+        if (indice >= B){indice = B-1.0;}
+        const int indiceintero = static_cast<int>(indice);
+        return statistica <= (1.0-peso)*statistiche[indiceintero-1]+peso*statistiche[indiceintero];
+    }
+    if (nulla == '>') {
+        double indice = B*alfa;
+        const double peso = indice-std::floor(indice);
+        if (indice < 1.0){indice = 1.0;}
+        if (indice >= B){indice = B-1.0;}
+        const int indiceintero = static_cast<int>(indice);
+        return statistica >= (1.0-peso)*statistiche[indiceintero-1]+peso*statistiche[indiceintero];
+    }
+    if (nulla == '=') {
+        double indice1 = B*alfa/2.0;
+        double indice2 = B*(1.0-alfa/2.0);
+        const double peso1 = indice1-std::floor(indice1);
+        const double peso2 = indice2-std::floor(indice2);
+        if (indice1 < 1.0){indice1 = 1.0;}
+        if (indice2 >= B){indice2 = B-1.0;}
+        const int indiceintero1 = static_cast<int>(indice1);
+        const int indiceintero2 = static_cast<int>(indice2);
+        return statistica >= (1.0-peso1)*statistiche[indiceintero1-1]+peso1*statistiche[indiceintero1] && statistica <= (1.0-peso2)*statistiche[indiceintero2-1]+peso2*statistiche[indiceintero2];
+    }
+    return true;
+}
+
+
+double potenzabootstrapttest(const char nulla, const int B, const double mu0, const int n, const double alfa, const int volte,
+    const double media, const double varianza) {
+    int accettazioni = 0;
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    std::normal_distribution<> normale(media, std::sqrt(varianza));
+    for (int i = 0; i < volte; i++) {
+        std::vector<double> campione(n);
+        for (int j = 0; j < n; j++){
+            campione[j] = normale(generatore);
+        }
+        if (bootstrapttest(campione, nulla, B, mu0, n, alfa)){accettazioni++;}
+    }
+    return 1.0-static_cast<double>(accettazioni)/volte;
+}
+
+
+double varianzaneweywest(const std::vector<double> dati, const int n) {
+    double media = 0.0;
+    for (int i = 0; i < n; i++) {
+        media += dati[i];
+    }
+    media /= n;
+    double varianza = 0.0;
+    for (int i = 0; i < n; i++) {
+        const double d = dati[i]-media;
+        varianza += d*d;
+    }
+    varianza /= n;
+    for (int i = 1; i < n; i++) {
+        double autocovarianza = 0.0;
+        for (int j = 0; j < n-i; j++) {
+            autocovarianza += (dati[j]-media)*(dati[j+i]-media);
+        }
+        autocovarianza /= n;
+        autocovarianza *= static_cast<double>(n-i)/n;
+        varianza += 2.0*autocovarianza;
+    }
+    return varianza;
+}
+
+
+int calcolaalfaveroneweywest(const int n, const double mu0, const double sigma2, const int iterazioni,
+    const double t, std::vector<double> &medie, std::vector<double> &neweywest) {
+    int accettazioni = 0;
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    std::normal_distribution<> epsilon(0.0, std::sqrt(sigma2));
+    for (int i = 0; i < iterazioni; i++){
+        std::vector<double> campione(n);
+        double precedente = 0.0;
+        double media = 0.0;
+        for (int j = 0; j < n; j++) {
+            precedente = precedente*0.5+epsilon(generatore);
+            campione[j] = precedente+mu0;
+            media += precedente;
+        }
+        media += n*mu0;
+        media /= n;
+        double varianza = 0.0;
+        for (int j = 0; j < n; j++) {
+            const double d = campione[j]-media;
+            varianza += d*d;
+        }
+        varianza /= n;
+        for (int j = 1; j < n; j++) {
+            double autocovarianza = 0.0;
+            for (int k = 0; k < n-j; k++) {
+                autocovarianza += (campione[k]-media)*(campione[k+j]-media);
+            }
+            autocovarianza /= n;
+            autocovarianza *= static_cast<double>(n-j)/n;
+            varianza += 2.0*autocovarianza;
+        }
+        medie[i] = media;
+        neweywest[i] = varianza;
+        if (mu0 > media-t*std::sqrt(varianza/n) && mu0 < media+t*std::sqrt(varianza/n)){accettazioni++;}
+    }
+    return accettazioni;
+}
+
+
+double alfaveroneweywest(const int n, const double mu0, const double sigma2, const int volte, const double t) {
+    int numerothread = static_cast<int>(std::thread::hardware_concurrency());
+    int accettazioni = 0;
+    if (numerothread == 0){numerothread = 4;}
+    std::vector<std::thread> thread(numerothread);
+    const int volteperthread = volte/numerothread;
+    const int iterazionirestanti = volte%numerothread;
+    std::vector<std::vector<double>> medie(numerothread-1, std::vector<double>(volteperthread));
+    std::vector<std::vector<double>> neweywest(numerothread-1, std::vector<double>(volteperthread));
+    for (int i = 0; i < numerothread - 1; i++){
+        thread[i] = std::thread([=, &accettazioni, &medie, &neweywest](){
+            accettazioni += calcolaalfaveroneweywest(n, mu0, sigma2, volteperthread, t, medie[i], neweywest[i]);
+        });
+    }
+    std::vector<double> fantoccio(volteperthread+iterazionirestanti);
+    std::vector<double> spaventapasseri(volteperthread+iterazionirestanti);
+    thread[numerothread - 1] = std::thread([=, &accettazioni, &fantoccio, &spaventapasseri](){
+        accettazioni += calcolaalfaveroneweywest(n, mu0, sigma2, volteperthread+iterazionirestanti, t, fantoccio, spaventapasseri);
+    });
+    for (auto& th : thread){
+        th.join();
+    }
+    double mediamedie = 0.0;
+    for (int i = 0; i < numerothread-1; i++) {
+        for (int j = 0; j < volteperthread; j++){mediamedie += medie[i][j];}
+    }
+    mediamedie /= volteperthread*(numerothread-1);
+    double varianzamedie = 0.0;
+    double mediavarianze = 0.0;
+    for (int i = 0; i < numerothread-1; i++) {
+        for (int j = 0; j < volteperthread; j++) {
+            const double d = medie[i][j]-mediamedie;
+            varianzamedie += d*d;
+            mediavarianze += neweywest[i][j];
+        }
+    }
+    varianzamedie /= volteperthread*(numerothread-1)+1;
+    mediavarianze /= volteperthread*(numerothread-1);
+    return 1.0-static_cast<double>(accettazioni)/volte;
+}
+
+
+int calcolapotenzaneweywest(const int n, const double mu0, const double sigma2, const int iterazioni,
+        const double mediavera, const double t, const char nulla) {
+    int accettazioni = 0;
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    std::normal_distribution<> epsilon(0.0, std::sqrt(sigma2));
+    for (int i = 0; i < iterazioni; i++){
+        std::vector<double> campione(n);
+        double precedente = 0.0;
+        double media = 0.0;
+        for (int j = 0; j < n; j++) {
+            precedente = precedente*0.5+epsilon(generatore);
+            campione[j] = precedente+mediavera;
+            media += precedente;
+        }
+        media += n*mediavera;
+        media /= n;
+        double varianza = 0.0;
+        for (int j = 0; j < n; j++) {
+            const double d = campione[j]-media;
+            varianza += d*d;
+        }
+        for (int j = 1; j < n; j++) {
+            double autocovarianza = 0.0;
+            for (int k = 0; k < n-j; k++) {
+                autocovarianza += (campione[k]-media)*(campione[k+j]-media);
+            }
+            autocovarianza *= static_cast<double>(n-j)/n;
+            varianza += 2.0*autocovarianza;
+        }
+        varianza /= n-1;
+        const double statistica = (media-mu0)*std::sqrt(n/varianza);
+        if (nulla == '<' && statistica <= t){accettazioni++;}
+        if (nulla == '=' && statistica >= -t && statistica <= t){accettazioni++;}
+        if (nulla == '>' && statistica >= t){accettazioni++;}
+    }
+    return accettazioni;
+}
+
+
+double potenzaneweywest(const int n, const double mu0, const double sigma2, const int volte, const double media, const double t,
+    const char nulla) {
+    int numerothread = static_cast<int>(std::thread::hardware_concurrency());
+    int accettazioni = 0;
+    if (numerothread == 0){numerothread = 4;}
+    std::vector<std::thread> thread(numerothread);
+    const int volteperthread = volte/numerothread;
+    const int iterazionirestanti = volte%numerothread;
+    for (int i = 0; i < numerothread - 1; i++){
+        thread[i] = std::thread([=, &accettazioni](){
+            accettazioni += calcolapotenzaneweywest(n, mu0, sigma2, volteperthread, media, t, nulla);
+        });
+    }
+    thread[numerothread - 1] = std::thread([=, &accettazioni](){
+        accettazioni += calcolapotenzaneweywest(n, mu0, sigma2, volteperthread+iterazionirestanti, media, t, nulla);
+    });
+    for (auto& th : thread){
+        th.join();
+    }
+    return 1.0-static_cast<double>(accettazioni)/volte;
+}
+
+
+void calcolabootstrapvarianze(const std::vector<double> ascisse, const std::vector<double> ordinate,
+    const double sigma01, const double sigma02, const int iterazioni, const int aggiuntive,
+    const int n, std::vector<double> &statisticheascisse, std::vector<double> &statisticheordinate,
+    std::vector<double> &varianzeascisse, std::vector<double> &varianzeordinate,
+    std::vector<double> &correlazioni, const int thread) {
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    std::uniform_int_distribution<> indice(0, n-1);
+    for (int i = 0; i < iterazioni+aggiuntive; i++) {
+        std::vector<double> campioneascisse(n);
+        std::vector<double> campioneordinate(n);
+        double mediaascisse = 0.0;
+        double mediaordinate = 0.0;
+        for (int j = 0; j < n; j++) {
+            const int dato = indice(generatore);
+            const double ascissa = ascisse[dato];
+            const double ordinata = ordinate[dato];
+            campioneascisse[j] = ascissa;
+            campioneordinate[j] = ordinata;
+            mediaascisse += ascissa;
+            mediaordinate += ordinata;
+        }
+        mediaascisse /= n;
+        mediaordinate /= n;
+        double varianzaascisse = 0.0;
+        double varianzaordinate = 0.0;
+        double covarianza = 0.0;
+        for (int j = 0; j < n; j++) {
+            const double differenzaascisse = campioneascisse[j]-mediaascisse;
+            const double differenzaordinate = campioneordinate[j]-mediaordinate;
+            varianzaascisse += differenzaascisse*differenzaascisse;
+            varianzaordinate += differenzaordinate*differenzaordinate;
+            covarianza += differenzaascisse*differenzaordinate;
+        }
+        varianzaascisse /= n-1;
+        varianzaordinate /= n-1;
+        covarianza /= n-1;
+        const int posizione = iterazioni*thread+i;
+        varianzeascisse[posizione] = varianzaascisse;
+        varianzeordinate[posizione] = varianzaordinate;
+        correlazioni[posizione] = covarianza/std::sqrt(varianzaascisse*varianzaordinate);
+        statisticheascisse[posizione] = (n-1.0)*varianzaascisse/sigma01;
+        statisticheordinate[posizione] = (n-1.0)*varianzaordinate/sigma02;
+    }
+}
+
+
+std::array<double, 8> bootstrapvarianze(const std::vector<double> ascisse, const std::vector<double> ordinate,
+    const char nulla1, const char nulla2, const int B, const double sigma01, const double sigma02,
+    const int n, const double alfa1, const double alfa2, const double alfa3) {
+    if (ascisse.size() != n || ordinate.size() != n || B < 1 || n < 2 || alfa1 <= 0.0 || alfa1 >= 1.0 || alfa2 <= 0.0 || alfa2 >= 1.0 || alfa3 <= 0.0 || alfa3 >= 1.0){throw std::runtime_error("Errore");}
+    if (nulla1 != '<' && nulla1 != '=' && nulla1 != '>'){throw std::runtime_error("Errore");}
+    if (nulla2 != '<' && nulla2 != '=' && nulla2 != '>'){throw std::runtime_error("Errore");}
+    double mediaascisse = 0.0;
+    double mediaordinate = 0.0;
+    for (int i = 0; i < n; i++){mediaascisse += ascisse[i]; mediaordinate += ordinate[i];}
+    mediaascisse /= n;
+    mediaordinate /= n;
+    double varianzaascisse = 0.0;
+    double varianzaordinate = 0.0;
+    for (int i = 0; i < n; i++){
+        const double d1 = ascisse[i]-mediaascisse;
+        const double d2 = ordinate[i]-mediaordinate;
+        varianzaascisse += d1*d1;
+        varianzaordinate += d2*d2;
+    }
+    varianzaascisse /= n-1;
+    varianzaordinate /= n-1;
+    const double statisticaascisse = (n-1.0)*varianzaascisse/sigma01;
+    const double statisticaordinate = (n-1.0)*varianzaordinate/sigma02;
+    int numerothread = static_cast<int>(std::thread::hardware_concurrency());
+    if (numerothread == 0){numerothread = 4;}
+    std::vector<std::thread> thread(numerothread);
+    const int volteperthread = B/numerothread;
+    const int iterazionirestanti = B%numerothread;
+    std::vector<double> varianzeascisse(B, 0.0);
+    std::vector<double> varianzeordinate(B, 0.0);
+    std::vector<double> correlazioni(B, 0.0);
+    std::vector<double> statisticheascisse(B, 0.0);
+    std::vector<double> statisticheordinate(B, 0.0);
+    for (int i = 0; i < numerothread - 1; i++){
+        int indicethread = i;
+        thread[i] = std::thread([=, &varianzeascisse, &varianzeordinate, &correlazioni, &statisticheascisse, &statisticheordinate](){
+            calcolabootstrapvarianze(ascisse, ordinate, varianzaascisse, varianzaordinate, volteperthread, 0, n,
+                statisticheascisse, statisticheordinate, varianzeascisse, varianzeordinate, correlazioni, indicethread);
+        });
+    }
+    thread[numerothread - 1] = std::thread([=, &varianzeascisse, &varianzeordinate, &correlazioni, &statisticheascisse, &statisticheordinate](){
+        calcolabootstrapvarianze(ascisse, ordinate, varianzaascisse, varianzaordinate, volteperthread, iterazionirestanti, n,
+            statisticheascisse, statisticheordinate, varianzeascisse, varianzeordinate, correlazioni, numerothread-1);
+    });
+    for (auto& t : thread){
+        t.join();
+    }
+    std::sort(varianzeascisse.begin(), varianzeascisse.end());
+    std::sort(varianzeordinate.begin(), varianzeordinate.end());
+    std::sort(correlazioni.begin(), correlazioni.end());
+    std::sort(statisticheascisse.begin(), statisticheascisse.end());
+    std::sort(statisticheordinate.begin(), statisticheordinate.end());
+    double indice1 = B*alfa1/2.0;
+    const double peso1 = indice1-std::floor(indice1);
+    if (indice1 < 1.0){indice1 = 1.0;}
+    if (indice1 >= B){indice1 = B-1.0;}
+    const int indiceintero1 = static_cast<int>(indice1);
+    double indice4 = B*(1.0-alfa1/2.0);
+    const double peso4 = indice4-std::floor(indice4);
+    if (indice4 < 1.0){indice4 = 1.0;}
+    if (indice4 >= B){indice4 = B-1.0;}
+    const int indiceintero4 = static_cast<int>(indice4);
+    double indice5 = B*alfa2/2.0;
+    const double peso5 = indice5-std::floor(indice5);
+    if (indice5 < 1.0){indice5 = 1.0;}
+    if (indice5 >= B){indice5 = B-1.0;}
+    const int indiceintero5 = static_cast<int>(indice5);
+    double indice8 = B*(1.0-alfa2/2.0);
+    const double peso8 = indice8-std::floor(indice8);
+    if (indice8 < 1.0){indice8 = 1.0;}
+    if (indice8 >= B){indice8 = B-1.0;}
+    const int indiceintero8 = static_cast<int>(indice8);
+    double indice9 = B*alfa3/2.0;
+    const double peso9 = indice9-std::floor(indice9);
+    if (indice9 < 1.0){indice9 = 1.0;}
+    if (indice9 >= B){indice9 = B-1.0;}
+    const int indiceintero9 = static_cast<int>(indice9);
+    double indice10 = B*(1.0-alfa3/2.0);
+    const double peso10 = indice10-std::floor(indice10);
+    if (indice10 < 1.0){indice10 = 1.0;}
+    if (indice10 >= B){indice10 = B-1.0;}
+    const int indiceintero10 = static_cast<int>(indice10);
+    const double l1 = (1.0-peso1)*varianzeascisse[indiceintero1-1]+peso1*varianzeascisse[indiceintero1];
+    const double u1 = (1.0-peso4)*varianzeascisse[indiceintero4-1]+peso4*varianzeascisse[indiceintero4];
+    const double l2 = (1.0-peso5)*varianzeordinate[indiceintero5-1]+peso5*varianzeordinate[indiceintero5];
+    const double u2 = (1.0-peso8)*varianzeordinate[indiceintero8-1]+peso8*varianzeordinate[indiceintero8];
+    const double l3 = (1.0-peso9)*correlazioni[indiceintero9-1]+peso9*correlazioni[indiceintero9];
+    const double u3 = (1.0-peso10)*correlazioni[indiceintero10-1]+peso10*correlazioni[indiceintero10];
+    int spartiacque1 = B;
+    for (int i = 0; i < B; i++){if (statisticaascisse < statisticheascisse[i]){spartiacque1 = i; break;}}
+    int spartiacque2 = B;
+    for (int i = 0; i < B; i++){if (statisticaordinate < statisticheordinate[i]){spartiacque2 = i; break;}}
+    double p1;
+    double p2;
+    if (nulla1 == '<') {p1 = static_cast<double>(B-spartiacque1)/B;}
+    if (nulla1 == '>') {p1 = static_cast<double>(spartiacque1)/B;}
+    if (nulla1 == '=') {if (spartiacque1 <= B/2){p1 = 2.0*static_cast<double>(spartiacque1)/B;} else {p1 = 2.0*static_cast<double>(B-spartiacque1)/B;}}
+    if (nulla2 == '<') {p2 = static_cast<double>(B-spartiacque2)/B;}
+    if (nulla2 == '>') {p2 = static_cast<double>(spartiacque2)/B;}
+    if (nulla2 == '=') {if (spartiacque2 <= B/2){p2 = 2.0*static_cast<double>(spartiacque2)/B;} else {p2 = 2.0*static_cast<double>(B-spartiacque2)/B;}}
+    return {l1, u1, l2, u2, l3, u3, p1, p2};
+}
+
+
+std::array<double, 5> potenzabootstrapvarianze(const char nulla1, const char nulla2, const int B,
+    const double sigma01, const double sigma02, const int n, const double alfa1, const double alfa2,
+    const double alfa3, const int volte, const double varianza1, const double varianza2,
+    const double correlazione, const double alfai1, const double alfai2) {
+    int accettazioni1 = 0;
+    int accettazioni2 = 0;
+    int accettazioni3 = 0;
+    int accettazioni4 = 0;
+    int accettazioni5 = 0;
+    const double covarianza = correlazione*std::sqrt(varianza1*varianza2);
+    const double cholesky1 = std::sqrt(varianza1);
+    const double cholesky2 = covarianza/cholesky1;
+    const double cholesky3 = std::sqrt(varianza2-cholesky2*cholesky2);
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    std::normal_distribution<> normale1(0.0, 1.0);
+    std::normal_distribution<> normale2(0.0, 1.0);
+    for (int i = 0; i < volte; i++) {
+        std::vector<double> campioneascisse(n);
+        std::vector<double> campioneordinate(n);
+        for (int j = 0; j < n; j++){
+            const double base = normale1(generatore);
+            campioneascisse[j] = base*cholesky1;
+            campioneordinate[j] = base*cholesky2+normale2(generatore)*cholesky3;
+        }
+        std::array<double, 8> risultato = bootstrapvarianze(campioneascisse, campioneordinate, nulla1, nulla2, B,
+            sigma01, sigma02, n, alfa1, alfa2, alfa3);
+        if (risultato[0] <= varianza1 && risultato[1] >= varianza1){accettazioni1++;}
+        if (risultato[2] <= varianza2 && risultato[3] >= varianza2){accettazioni2++;}
+        if (risultato[4] <= correlazione && risultato[5] >= correlazione){accettazioni3++;}
+        if (risultato[6] >= alfai1){accettazioni4++;}
+        if (risultato[7] >= alfai2){accettazioni5++;}
+    }
+    const double v = static_cast<double>(volte);
+    return {accettazioni1/v, accettazioni2/v, accettazioni3/v, accettazioni4/v, accettazioni5/v};
+}
+
+
+void calcolabootstrapmobilevarianze(const std::vector<double> ascisse, const std::vector<double> ordinate,
+    const double sigma01, const double sigma02, const int iterazioni, const int aggiuntive,
+    const int n, std::vector<double> &statisticheascisse, std::vector<double> &statisticheordinate,
+    std::vector<double> &varianzeascisse, std::vector<double> &varianzeordinate,
+    std::vector<double> &correlazioni, const int thread, const int b) {
+    const int k = n/b+1;
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    std::uniform_int_distribution<> indice(0, n-b+1);
+    for (int i = 0; i < iterazioni+aggiuntive; i++) {
+        std::vector<double> campioneascisse(k*b);
+        std::vector<double> campioneordinate(k*b);
+        double mediaascisse = 0.0;
+        double mediaordinate = 0.0;
+        for (int j = 0; j < k; j++) {
+            const int dato = indice(generatore);
+            for (int l = 0; l < b; l++){
+                const double ascissa = ascisse[dato+l];
+                const double ordinata = ordinate[dato+l];
+                campioneascisse[j*b+l] = ascissa;
+                campioneordinate[j*b+l] = ordinata;
+                mediaascisse += ascissa;
+                mediaordinate += ordinata;
+            }
+        }
+        mediaascisse /= n;
+        mediaordinate /= n;
+        double varianzaascisse = 0.0;
+        double varianzaordinate = 0.0;
+        double covarianza = 0.0;
+        for (int j = 0; j < n; j++) {
+            const double differenzaascisse = campioneascisse[j]-mediaascisse;
+            const double differenzaordinate = campioneordinate[j]-mediaordinate;
+            varianzaascisse += differenzaascisse*differenzaascisse;
+            varianzaordinate += differenzaordinate*differenzaordinate;
+            covarianza += differenzaascisse*differenzaordinate;
+        }
+        varianzaascisse /= n-1;
+        varianzaordinate /= n-1;
+        covarianza /= n-1;
+        const int posizione = iterazioni*thread+i;
+        varianzeascisse[posizione] = varianzaascisse;
+        varianzeordinate[posizione] = varianzaordinate;
+        correlazioni[posizione] = covarianza/std::sqrt(varianzaascisse*varianzaordinate);
+        statisticheascisse[posizione] = (n-1.0)*varianzaascisse/sigma01;
+        statisticheordinate[posizione] = (n-1.0)*varianzaordinate/sigma02;
+    }
+}
+
+
+std::array<double, 8> bootstrapmobilevarianze(const std::vector<double> ascisse, const std::vector<double> ordinate,
+    const char nulla1, const char nulla2, const int B, const double sigma01, const double sigma02,
+    const int n, const double alfa1, const double alfa2, const double alfa3, const int b) {
+    if (ascisse.size() != n || ordinate.size() != n || B < 1 || b < 1 || n < 2 || alfa1 <= 0.0 || alfa1 >= 1.0 || alfa2 <= 0.0 || alfa2 >= 1.0 || alfa3 <= 0.0 || alfa3 >= 1.0){throw std::runtime_error("Errore");}
+    if (nulla1 != '<' && nulla1 != '=' && nulla1 != '>'){throw std::runtime_error("Errore");}
+    if (nulla2 != '<' && nulla2 != '=' && nulla2 != '>'){throw std::runtime_error("Errore");}
+    double mediaascisse = 0.0;
+    double mediaordinate = 0.0;
+    for (int i = 0; i < n; i++){mediaascisse += ascisse[i]; mediaordinate += ordinate[i];}
+    mediaascisse /= n;
+    mediaordinate /= n;
+    double varianzaascisse = 0.0;
+    double varianzaordinate = 0.0;
+    for (int i = 0; i < n; i++){
+        const double d1 = ascisse[i]-mediaascisse;
+        const double d2 = ordinate[i]-mediaordinate;
+        varianzaascisse += d1*d1;
+        varianzaordinate += d2*d2;
+    }
+    varianzaascisse /= n-1;
+    varianzaordinate /= n-1;
+    const double statisticaascisse = (n-1.0)*varianzaascisse/sigma01;
+    const double statisticaordinate = (n-1.0)*varianzaordinate/sigma02;
+    int numerothread = static_cast<int>(std::thread::hardware_concurrency());
+    if (numerothread == 0){numerothread = 4;}
+    std::vector<std::thread> thread(numerothread);
+    const int volteperthread = B/numerothread;
+    const int iterazionirestanti = B%numerothread;
+    std::vector<double> varianzeascisse(B, 0.0);
+    std::vector<double> varianzeordinate(B, 0.0);
+    std::vector<double> correlazioni(B, 0.0);
+    std::vector<double> statisticheascisse(B, 0.0);
+    std::vector<double> statisticheordinate(B, 0.0);
+    for (int i = 0; i < numerothread - 1; i++){
+        int indicethread = i;
+        thread[i] = std::thread([=, &varianzeascisse, &varianzeordinate, &correlazioni, &statisticheascisse, &statisticheordinate](){
+            calcolabootstrapmobilevarianze(ascisse, ordinate, varianzaascisse, varianzaordinate, volteperthread, 0, n,
+                statisticheascisse, statisticheordinate, varianzeascisse, varianzeordinate, correlazioni, indicethread, b);
+        });
+    }
+    thread[numerothread - 1] = std::thread([=, &varianzeascisse, &varianzeordinate, &correlazioni, &statisticheascisse, &statisticheordinate](){
+        calcolabootstrapmobilevarianze(ascisse, ordinate, varianzaascisse, varianzaordinate, volteperthread, iterazionirestanti, n,
+            statisticheascisse, statisticheordinate, varianzeascisse, varianzeordinate, correlazioni, numerothread-1, b);
+    });
+    for (auto& t : thread){
+        t.join();
+    }
+    std::sort(varianzeascisse.begin(), varianzeascisse.end());
+    std::sort(varianzeordinate.begin(), varianzeordinate.end());
+    std::sort(correlazioni.begin(), correlazioni.end());
+    std::sort(statisticheascisse.begin(), statisticheascisse.end());
+    std::sort(statisticheordinate.begin(), statisticheordinate.end());
+    double indice1 = B*alfa1/2.0;
+    const double peso1 = indice1-std::floor(indice1);
+    if (indice1 < 1.0){indice1 = 1.0;}
+    if (indice1 >= B){indice1 = B-1.0;}
+    const int indiceintero1 = static_cast<int>(indice1);
+    double indice4 = B*(1.0-alfa1/2.0);
+    const double peso4 = indice4-std::floor(indice4);
+    if (indice4 < 1.0){indice4 = 1.0;}
+    if (indice4 >= B){indice4 = B-1.0;}
+    const int indiceintero4 = static_cast<int>(indice4);
+    double indice5 = B*alfa2/2.0;
+    const double peso5 = indice5-std::floor(indice5);
+    if (indice5 < 1.0){indice5 = 1.0;}
+    if (indice5 >= B){indice5 = B-1.0;}
+    const int indiceintero5 = static_cast<int>(indice5);
+    double indice8 = B*(1.0-alfa2/2.0);
+    const double peso8 = indice8-std::floor(indice8);
+    if (indice8 < 1.0){indice8 = 1.0;}
+    if (indice8 >= B){indice8 = B-1.0;}
+    const int indiceintero8 = static_cast<int>(indice8);
+    double indice9 = B*alfa3/2.0;
+    const double peso9 = indice9-std::floor(indice9);
+    if (indice9 < 1.0){indice9 = 1.0;}
+    if (indice9 >= B){indice9 = B-1.0;}
+    const int indiceintero9 = static_cast<int>(indice9);
+    double indice10 = B*(1.0-alfa3/2.0);
+    const double peso10 = indice10-std::floor(indice10);
+    if (indice10 < 1.0){indice10 = 1.0;}
+    if (indice10 >= B){indice10 = B-1.0;}
+    const int indiceintero10 = static_cast<int>(indice10);
+    const double l1 = (1.0-peso1)*varianzeascisse[indiceintero1-1]+peso1*varianzeascisse[indiceintero1];
+    const double u1 = (1.0-peso4)*varianzeascisse[indiceintero4-1]+peso4*varianzeascisse[indiceintero4];
+    const double l2 = (1.0-peso5)*varianzeordinate[indiceintero5-1]+peso5*varianzeordinate[indiceintero5];
+    const double u2 = (1.0-peso8)*varianzeordinate[indiceintero8-1]+peso8*varianzeordinate[indiceintero8];
+    const double l3 = (1.0-peso9)*correlazioni[indiceintero9-1]+peso9*correlazioni[indiceintero9];
+    const double u3 = (1.0-peso10)*correlazioni[indiceintero10-1]+peso10*correlazioni[indiceintero10];
+    int spartiacque1 = B;
+    for (int i = 0; i < B; i++){if (statisticaascisse < statisticheascisse[i]){spartiacque1 = i; break;}}
+    int spartiacque2 = B;
+    for (int i = 0; i < B; i++){if (statisticaordinate < statisticheordinate[i]){spartiacque2 = i; break;}}
+    double p1;
+    double p2;
+    if (nulla1 == '<') {p1 = static_cast<double>(B-spartiacque1)/B;}
+    if (nulla1 == '>') {p1 = static_cast<double>(spartiacque1)/B;}
+    if (nulla1 == '=') {if (spartiacque1 <= B/2){p1 = 2.0*static_cast<double>(spartiacque1)/B;} else {p1 = 2.0*static_cast<double>(B-spartiacque1)/B;}}
+    if (nulla2 == '<') {p2 = static_cast<double>(B-spartiacque2)/B;}
+    if (nulla2 == '>') {p2 = static_cast<double>(spartiacque2)/B;}
+    if (nulla2 == '=') {if (spartiacque2 <= B/2){p2 = 2.0*static_cast<double>(spartiacque2)/B;} else {p2 = 2.0*static_cast<double>(B-spartiacque2)/B;}}
+    return {l1, u1, l2, u2, l3, u3, p1, p2};
+}
+
+
+std::array<double, 5> potenzabootstrapmobilevarianze(const char nulla1, const char nulla2, const int B,
+    const double sigma01, const double sigma02, const int n, const double alfa1, const double alfa2,
+    const double alfa3, const int volte, const double varianza1, const double varianza2,
+    const double correlazione, const double alfai1, const double alfai2, const int b) {
+    int accettazioni1 = 0;
+    int accettazioni2 = 0;
+    int accettazioni3 = 0;
+    int accettazioni4 = 0;
+    int accettazioni5 = 0;
+    const double covarianza = correlazione*std::sqrt(varianza1*varianza2);
+    const double cholesky1 = std::sqrt(varianza1);
+    const double cholesky2 = covarianza/cholesky1;
+    const double cholesky3 = std::sqrt(varianza2-cholesky2*cholesky2);
+    std::random_device dispositivo;
+    std::mt19937 generatore(dispositivo());
+    std::normal_distribution<> normale1(0.0, 1.0);
+    std::normal_distribution<> normale2(0.0, 1.0);
+    for (int i = 0; i < volte; i++) {
+        std::vector<double> campioneascisse(n);
+        std::vector<double> campioneordinate(n);
+        for (int j = 0; j < n; j++){
+            const double base = normale1(generatore);
+            campioneascisse[j] = base*cholesky1;
+            campioneordinate[j] = base*cholesky2+normale2(generatore)*cholesky3;
+        }
+        std::array<double, 8> risultato = bootstrapmobilevarianze(campioneascisse, campioneordinate, nulla1, nulla2, B,
+            sigma01, sigma02, n, alfa1, alfa2, alfa3, b);
+        if (risultato[0] <= varianza1 && risultato[1] >= varianza1){accettazioni1++;}
+        if (risultato[2] <= varianza2 && risultato[3] >= varianza2){accettazioni2++;}
+        if (risultato[4] <= correlazione && risultato[5] >= correlazione){accettazioni3++;}
+        if (risultato[6] >= alfai1){accettazioni4++;}
+        if (risultato[7] >= alfai2){accettazioni5++;}
+    }
+    const double v = static_cast<double>(volte);
+    return {accettazioni1/v, accettazioni2/v, accettazioni3/v, accettazioni4/v, accettazioni5/v};
+}
 
 
 PYBIND11_MODULE(miomodulo, m) {
+    m.def("autocorrelazioniangolari", &autocorrelazioniangolari, "Funzione per calcolare le autocorrelazioni degli angoli.");
     m.def("testhotelling", &testhotelling, "Funzione per eseguire il test di Hotelling.");
-    m.def("betatesthotelling", &betatesthotelling, "Funzione per calcolare la probabilita di errore di II tipo del test di Hotelling.");
+    m.def("betatesthotelling",
+        [](const int t, const double s, const int v, const double d, const double va, const double vo){py::gil_scoped_release release; return betatesthotelling(t, s, v, d, va, vo);},
+        "Funzione per calcolare la probabilita di errore di II tipo del test di Hotelling.");
     m.def("ljungbox", &ljungbox, "Funzione per eseguire il test di Ljung-Box.");
-    m.def("betaljungbox", &betaljungbox, "Funzione per calcolare la probabilita di errore di II tipo del test di Ljung-Box.");
-    m.def("alfaveroljungbox", &alfaveroljungbox, "Funzione per calcolare la probabilita di errore di I tipo effettiva del test di Ljung-Box.");
+    m.def("betaljungbox",
+        [](const int t, const std::vector<int> &c, const std::vector<double> &s, const int n, const int i){py::gil_scoped_release release; return betaljungbox(t, c, s, n, i);},
+        "Funzione per calcolare la probabilita di errore di II tipo del test di Ljung-Box.");
+    m.def("alfaveroljungbox",
+        [](const int t, const std::vector<int> &c, const std::vector<double> &s, const int n, const int i){py::gil_scoped_release release; return alfaveroljungbox(t, c, s, n, i);},
+        "Funzione per calcolare la probabilita di errore di I tipo effettiva del test di Ljung-Box.");
     m.def("testhenzezirkler", &testhenzezirkler, "Funzione per eseguire il test di Henze-Zirkler restituendone le statistiche rilevanti.");
     m.def("testmardia", &testmardia, "Funzione per eseguire il test di Mardia.");
-    m.def("betatesthenzezirkler", &betatesthenzezirkler, "Funzione per calcolare la probabilita di errore di II tipo del test di Henze-Zirkler.");
-    m.def("betatestmardia", &betatestmardia, "Funzione per calcolare la probabilita di errore di II tipo del test di Mardia.");
-    m.def("alfaverohenzezirkler", &alfaverohenzezirkler, "Funzione per calcolare la probabilita di errore di I tipo effettiva del test di Henze-Zirkler.");
-    m.def("alfaveromardia", &alfaveromardia, "Funzione per calcolare la probabilita di errore di I tipo effettiva del test di Mardia.");
-    m.def("clustering", &clustering, "Funzione per effettuare il clustering. Restituisce una lista di etichette.");
-    m.def("betatestnorme", &betatestnorme, "Funzione per calcolare la probabilita di errore di II tipo del test sulle norme.");
-    m.def("betatestvarianze", &betatestvarianze, "Funzione per calcolare la probabilita di errore di II tipo del test sulle varianze.");
+    m.def("betatesthenzezirkler",
+        [](const std::string &d, const int t, const int i, const int g, const double aa, const double ao, const double dc){py::gil_scoped_release release; return betatesthenzezirkler(d, t, i, g, aa, ao, dc);},
+        "Funzione per calcolare la probabilita di errore di II tipo del test di Henze-Zirkler.");
+    m.def("betatestmardia",
+        [](const int i, const int t, const std::string &d, const double aa, const double ao, const double dc, const int g, const double sa, const double sc){py::gil_scoped_release release; return betatestmardia(i, t, d, aa, ao, dc, g, sa, sc);},
+        "Funzione per calcolare la probabilita di errore di II tipo del test di Mardia.");
+    m.def("alfaverohenzezirkler",
+        [](const int i, const int t){py::gil_scoped_release release; return alfaverohenzezirkler(i, t);},
+        "Funzione per calcolare la probabilita di errore di I tipo effettiva del test di Henze-Zirkler.");
+    m.def("alfaveromardia",
+        [](const int i, const int t, const double sa, const double sc){py::gil_scoped_release release; return alfaveromardia(i, t, sa, sc);},
+        "Funzione per calcolare la probabilita di errore di I tipo effettiva del test di Mardia.");
+    m.def("clustering",
+        [](const std::string &i, const int t, const std::vector<double> &a, const std::vector<double> &o, const int ik, const int cm, const std::string &s, const int cb, const double ab, const int ii, const int ie, const bool n, const std::string &al, const double sc, const std::string &cs, const int bi, int f){py::gil_scoped_release release; return clustering(i, t, a, o, ik, cm, s, cb, ab, ii, ie, n, al, sc, cs, bi, f);},
+        "Funzione per effettuare il clustering. Restituisce una lista di etichette.");
+    m.def("betatestnorme",
+        [](const int t, const bool ma, const bool du, const int i, const double me, const double dt, const double v, const double s){py::gil_scoped_release release; return betatestnorme(t, ma, du, i, me, dt, v, s);},
+        "Funzione per calcolare la probabilita di errore di II tipo del test sulle norme.");
+    m.def("betatestvarianze",
+        [](const int i, const int t, const bool ma, const bool du, const double dt, const double s, const double ss, const double in){py::gil_scoped_release release; return betatestvarianze(i, t, ma, du, dt, s, ss, in);},
+        "Funzione per calcolare la probabilita di errore di II tipo del test sulle varianze.");
     m.def("freccedifettose", &freccedifettose, "Funzione per calcolare se ogni freccia è difettosa.");
-    m.def("betahotellingduecampioni", &betahotellingduecampioni, "Funzione per calcolare la probabilita di errore di II tipo del test di Hotelling a due campioni.");
-    m.def("betavarianzeduecampioni", &betavarianzeduecampioni, "Funzione per calcolare la probabilita di errore di II tipo di un test a due campioni sulle varianze.");
+    m.def("betahotellingduecampioni",
+        [](const int i, const double va, const double vo, const double c, const int t, const double d, const int n, const double s){py::gil_scoped_release release; return betahotellingduecampioni(i, va, vo, c, t, d, n, s);},
+        "Funzione per calcolare la probabilita di errore di II tipo del test di Hotelling a due campioni.");
+    m.def("betavarianzeduecampioni",
+        [](const int i, const double v, const int t, const int n, const double s){py::gil_scoped_release release; return betavarianzeduecampioni(i, v, t, n, s);},
+        "Funzione per calcolare la probabilita di errore di II tipo di un test a due campioni sulle varianze.");
     m.def("testvonmises", &testvonmises, "Funzione per testare se gli angoli vengono da una distribuzione di von Mises.");
-    m.def("alfaverointervalloangolomedio", &alfaverointervalloangolomedio, "Funzione per calcolare il livello di confidenza effettivo dell'intervallo sull'angolo medio.");
+    m.def("alfaverointervalloangolomedio",
+        [](const int i, const double k, const int t, const bool f, const double q){py::gil_scoped_release release; return alfaverointervalloangolomedio(i, k, t, f, q);},
+        "Funzione per calcolare il livello di confidenza effettivo dell'intervallo sull'angolo medio.");
     m.def("angolomediobayesiano", &angolomediobayesiano, "Funzione per calcolare con un paradigma bayesiano l'angolo medio.");
     m.def("misturevonmisesvariazionali", &misturevonmisesvariazionali, "Funzione per calcolare i parametri di modello mistura von Mises usando l'inferenza variazionale.");
-    m.def("alfaverorayleigh", &alfaverorayleigh, "Funzione per calcolare l'errore di I tipo effettivo del test di Rayleigh.");
-    m.def("betaaffidabilitavonmises", &betaaffidabilitavonmises, "Funzione per calcolare l'errore di II tipo del test di goodness of fit della von Mises.");
-    m.def("alfaveroaffidabilitavonmises", &alfaveroaffidabilitavonmises, "Funzione per calcolare l'errore di I tipo effettivo del test di goodness of fit della von Mises.");
+    m.def("betarayleigh",
+        [](const int i, const double c, const int t, const double s){py::gil_scoped_release release; return betarayleigh(i, c, t, s);},
+        "Funzione per calcolare la probabilità di errore di II tipo del test di Rayleigh.");
+    m.def("alfaverorayleigh",
+        [](const int i, const double s, const int t){py::gil_scoped_release release; return alfaverorayleigh(i, s, t);},
+        "Funzione per calcolare l'errore di I tipo effettivo del test di Rayleigh.");
+    m.def("betaaffidabilitavonmises",
+        [](const int i, const bool u, const int t, const double s, const double d, const double k){py::gil_scoped_release release; return betaaffidabilitavonmises(i, u, t, s, d, k);},
+        "Funzione per calcolare l'errore di II tipo del test di goodness of fit della von Mises.");
+    m.def("alfaveroaffidabilitavonmises",
+        [](const int i, const double k, const int t, const double s){py::gil_scoped_release release; return alfaveroaffidabilitavonmises(i, k, t, s);},
+        "Funzione per calcolare l'errore di I tipo effettivo del test di goodness of fit della von Mises.");
     m.def("intervallokappa", &intervallokappa, "Funzione per calcolare l'intervallo di confidenza del parametro di concentrazione degli angoli.");
+    m.def("alfaverointervallokappa",
+        [](const int i, const double a, const double k, const int ib, const int t){py::gil_scoped_release release; return alfaverointervallokappa(i, a, k, ib, t);},
+        "Funzione per calcolare l'errore di I tipo effettivo dell'intervallo bootstrap per il parametro di concentrazione.");
+    m.def("bootstrapstazionariohotelling",
+        [](const int t, const std::vector<double> a, const std::vector<double> o, const double p, const int B, const double ma, const double mo, const double al){py::gil_scoped_release release; return bootstrapstazionariohotelling(t, a, o, p, B, ma, mo, al);},
+        "Funzione per calcolare la quantità Q che divisa per n viene usata per costruire un ellisse di confidenza robusto alle dipendenze usando il bootstrap stazionario.");
+    m.def("alfaverobootstrapstazionariohotelling",
+        [](const int t, const double va, const double vo, const double p, const int B, const double a, const int v){py::gil_scoped_release release; return alfaverobootstrapstazionariohotelling(t, va, vo, p, B, a, v);},
+        "Funzione per calcolare la probabilità effettiva di copertura di un intervallo di Hotelling usando il bootstrap stazionario.");
+    m.def("bootstrapmobilehotelling",
+        [](const int t, const std::vector<double> a, const std::vector<double> o, const int b, const int B, const double ma, const double mo, const double al){py::gil_scoped_release release; return bootstrapmobilehotelling(t, a, o, b, B, ma, mo, al);},
+        "Funzione per calcolare la quantità Q che divisa per n viene usata per costruire un ellisse di confidenza robusto alle dipendenze usando il bootstrap a blocchi mobili.");
+    m.def("alfaverobootstrapmobilehotelling",
+        [](const int t, const double va, const double vo, const int b, const int B, const double a, const int v){py::gil_scoped_release release; return alfaverobootstrapmobilehotelling(t, va, vo, b, B, a, v);},
+        "Funzione per calcolare la probabilità effettiva di copertura di un intervallo di Hotelling usando il bootstrap a blocchi mobili.");
+    m.def("bootstrapnorme",
+        [](const int t, const std::vector<double> n, const int B, const double a){py::gil_scoped_release release; return bootstrapnorme(t, n, B, a);},
+        "Funzione per calcolare una stima intervallare sulle norme per bootstrap.");
+    m.def("alfaverobootstrapnorme",
+        [](const int t, const double va, const int B, const double a, const int vo){py::gil_scoped_release release; return alfaverobootstrapnorme(t, va, B, a, vo);},
+        "Funzione per stimare l'alfa effettivo della stima intervallare per bootstrap.");
+    m.def("detrenda",
+        [](std::vector<double> a, std::vector<double> o, const double ba1, const double ba0, const double bo1, const double bo0, const int n){py::gil_scoped_release release; return detrenda(a, o, ba1, ba0, bo1, bo0, n);},
+        "Funzione per calcolare la media e la matrice di covarianze dei residui di un dataset.");
+    m.def("bootstrapttest",
+        [](const std::vector<double> no, const char nu, const int B, const double mu, const int n, const double a){py::gil_scoped_release release; return bootstrapttest(no, nu, B, mu, n, a);},
+        "Funzione per eseguire un t-test bootstrap.");
+    m.def("potenzabootstrapttest",
+        [](const char nu, const int B, const double mu, const int n, const double a, const int v, const double me, const double va){py::gil_scoped_release release; return potenzabootstrapttest(nu, B, mu, n, a, v, me, va);},
+        "Funzione per stimare la potenza del t-test bootstrap.");
+    m.def("alfaveroneweywest",
+        [](const int n, const double mu, const double s, const int v, const double t){py::gil_scoped_release release; return alfaveroneweywest(n, mu, s, v, t);},
+        "Funzione per stimare la vera probabilità di copertura di un intervallo-t con varianza di Newey-West.");
+    m.def("potenzaneweywest",
+        [](const int n, const double mu, const double s, const int v, const double me, const double t, const char nu){py::gil_scoped_release release; return potenzaneweywest(n, mu, s, v, me, t, nu);},
+        "Funzione per stimare la potenza di un t-test con varianza di Newey-West.");
+    m.def("varianzaneweywest",
+        [](const std::vector<double> d, const int n){py::gil_scoped_release release; return varianzaneweywest(d, n);},
+        "Funzione per calcolare lo stimatore di Newey-West per la varianza univariata.");
+    m.def("bootstrapvarianze",
+        [](const std::vector<double> a, const std::vector<double> o, const char n1, const char n2, const int B, const double s1, const double s2, const int n, const double a1, const double a2, const double a3){py::gil_scoped_release release; return bootstrapvarianze(a, o, n1, n2, B, s1, s2, n, a1, a2, a3);},
+        "Funzione per eseguire stime sulle varianze con il bootstrap.");
+    m.def("potenzabootstrapvarianze",
+        [](const char n1, const char n2, const int B, const double s1, const double s2, const int n, const double a1, const double a2, const double a3, const int vo, const double v1, const double v2, const double c, const double ai1, const double ai2) {py::gil_scoped_release release; return potenzabootstrapvarianze(n1, n2, B, s1, s2, n, a1, a2, a3, vo, v1, v2, c, ai1, ai2);},
+        "Funzione per stimare l'accuratezza delle procedure bootstrap nella stima delle varianze.");
+    m.def("bootstrapmobilevarianze",
+        [](const std::vector<double> a, const std::vector<double> o, const char n1, const char n2, const int B, const double s1, const double s2, const int n, const double a1, const double a2, const double a3, const int b){py::gil_scoped_release release; return bootstrapmobilevarianze(a, o, n1, n2, B, s1, s2, n, a1, a2, a3, b);},
+        "Funzione per eseguire stime sulle varianze con il bootstrap.");
+    m.def("potenzabootstrapmobilevarianze",
+        [](const char n1, const char n2, const int B, const double s1, const double s2, const int n, const double a1, const double a2, const double a3, const int vo, const double v1, const double v2, const double c, const double ai1, const double ai2, const int b) {py::gil_scoped_release release; return potenzabootstrapmobilevarianze(n1, n2, B, s1, s2, n, a1, a2, a3, vo, v1, v2, c, ai1, ai2, b);},
+        "Funzione per stimare l'accuratezza delle procedure bootstrap nella stima delle varianze.");
 }
