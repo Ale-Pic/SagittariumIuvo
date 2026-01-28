@@ -1,12 +1,37 @@
-These Python files, along with the C++/Stan code provided once compiled to an executable, can be interpreted to produce a Kivy-based user application where archers
-can input their equipment details and sessions as sequences of volleys and arrow positions, as well as metadata, save them as files and perform different statistical analyses of choice on them. Most
-classical descriptive statistics are supported; most importantly, it is possible to perform inference to check sight correctness, characterize the data-generating process
-and therefore the session itself, and use unsupervised learning (via clustering) to detect possible classes of mistakes. More elementary inference on scores and coordinate variances
-is also supported, as well as techniques to detect possible faulty arrows; much of the inference can also be applied to the corresponding polar coordinates. The application allows users
-to visualize the analysis and to tweak parameters. Finally, general-level analysis of the datasets is provided as a time series, allowing for progress tracking, performance prediction
-and supervised learning to measure the impact of different equipment setups or environmental conditions.
+# Archery Performance Analysis App
 
-The application will be expanded in the future: a focus is on finding methods that allow to more precisely single out shooting mistakes and on experimenting with methods with more
-relaxed assumptions or increased efficiency and speed.
+This repository contains a prototype application for the statistical analysis
+of archery training sessions, developed in Python with performance-critical
+components in C++ and Stan, and a Kivy-based graphical interface.
 
-Example datasets, as well as a setup script to correctly compile C++ to Python-readable binaries.
+The application allows users to:
+- input equipment details and training sessions as sequences of volleys and arrow positions
+- store sessions and metadata (equipment, conditions, etc.)
+- perform a range of statistical analyses on positional, angular, and score data
+- visualize results interactively and adjust analysis parameters
+
+### Implemented analyses
+The current prototype supports:
+- classical descriptive statistics on scores and coordinates
+- statistical inference to assess sight correctness and session characteristics
+- analysis of coordinate and polar representations
+- detection of potential faulty arrows
+- unsupervised learning techniques (clustering) to identify possible classes of shooting mistakes
+- time series analysis of sessions for progress tracking and performance prediction
+- supervised learning experiments to evaluate the impact of equipment and environmental conditions
+
+### Development status
+The project is a functional prototype focused on core logic, statistical methodology,
+and overall architecture. The current codebase prioritizes extensibility and experimentation.
+Further testing, optimization, and feature expansion are planned. 
+The statistical analysis core has been extensively exercised in practice,
+while parts of the GUI and orchestration layer are currently under active development
+and may require further refinement.
+
+
+### Repository contents
+- Python code for data handling, analysis, and GUI
+- C++ / Stan components compiled into Python-callable binaries
+- example datasets
+- setup scripts for building native extensions
+
