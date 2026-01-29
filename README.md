@@ -27,7 +27,7 @@ Further testing, optimization, and feature expansion are planned.
 The statistical analysis core has been extensively exercised in practice,
 while parts of the GUI and orchestration layer are currently under active development
 and may require further refinement; also, the statistical core has been recently reorganized for better integration with the orchestrating code
-but testing is still underway (previous versions of it still however work as intended). Full integration of a computer vision model is also
+but testing is still underway (previous versions of it in the SagittariumIuvo6.py file still however work as intended). Full integration of a computer vision model is also
 planned (see https://universe.roboflow.com/statisticallearningcolbrutti/statisticallearningcolbrutti).
 
 
