@@ -33,7 +33,7 @@ planned (see https://universe.roboflow.com/statisticallearningcolbrutti/statisti
 
 ### Repository contents
 - Python code for data handling, analysis, and GUI
-- C++ / Stan components compiled into Python-callable binaries
+- C++ / Stan components to be compiled into Python-callable binaries
 - example datasets
 - setup scripts for building native extensions
 
